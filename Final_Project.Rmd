@@ -1,0 +1,2454 @@
+---
+title: "And Your Grade Is..."
+subtitle: "Big Data Project"
+author: "Roee Tendler & Roi Weinreb"
+date: "July 2, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(caret)
+library(xtable)
+library(ggplot2)
+library(gridExtra)
+library(plotly)
+library(MASS)
+library(leaps)
+library(lmtest)
+library(knitr)
+library(kableExtra)
+library(boot)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+#knitr::opts_chunk$set(cache.extra = rand_seed)
+```
+
+<font color='#548bc9'>
+
+# Introduction 
+</font>
+Our data consists of different attributes of high school students in Portugal.  In addition to personal information (e.g sex, mother/father job, daily alcohol consumption, number of absences etc), there are grades of the first two semesters (G1,G2) and a final grade given in the end of the third semester (G3). 
+
+Our research question is: How well can we predict a student's grade based on his different attributes? In the process we want to understand which attributes effect the grade most. This may help students and teachers understand which factors are most likely to effect students' grades, and therefore should be related to. Overcoming this intellectual challenge and stepping into the world of data science is, of course, another strong motivation.
+
+
+<font color='#548bc9'>
+
+# Data 
+</font>
+The data was gathered by a Portuguese researcher by handing questionnaires to students from two different schools.
+
+The cases: There are 395 observations (students) in the data.
+There are 30 different features for each student, including sex, age, parents' education etc.
+The final grade is a numeric (integer) number between 0 and 20.
+The type of study is observational.
+
+Scope of inference: The population of interest are high school students. As mentioned before, the data was gathered from two schools in Portugal. We hope the results can be generelized to all Portuguese students and to high school students around the world. It is not obvious this can be done because information about the characteristics of the observed population were not provided to us, and therefore we don't know if there are potential sources of bias. For example, it could be that the observed population is of low class, and therefore it might be that the intellectual level there is lower than other sub population of high school students. We must also mention that one of the two subjects of this data set is Portuguese - which is less likely to generelize to other countries (different languages might have different difficulties and challenges in their learning process). More research is required to further asses the generalizability  of this inference.   
+
+Causality: The data can indicate on several correlations between parameters, and with additional reasonable a priori explanations, the data can support them. Still, the focus of this study is predictions and therefore we can't fully prove a causality - to be more certain about a causality, one should plan a research with well defined parameters to support it. 
+
+<font color='#548bc9'>
+
+# Exploratory Data Analysis 
+</font>
+
+First, we will fetch the data:
+```{r}
+#set working directory
+setwd("C:/Users/roinr/Desktop/Big_Data_Project")
+#import data
+dat_mat <- read.csv("student-mat.csv",sep = ';')
+dat_por <- read.csv("student-por.csv",sep = ';')
+```
+Let's take a look at several observations from the data:
+```{r}
+kable(head(dat_mat))  %>%
+  kable_styling() %>%  scroll_box(width = "800px", height = "140px")
+```
+
+
+<br />
+On one hand, we don't have many observations in each dataset thus we may want to combine them.
+On the other hand, it sounds reasonable that these subjects require different abbilities and may have different causes for success. So we may need to conduct seperate analysis for each subject.
+
+In order to decide, we will take advantage of the fact that the researcher provided a way to extract 382 observations (students) which appear both in Math and Portuguese datasets.
+We will make a paired t-test on these students to check if there is a difference between the subjects.
+First, we will verify that the distribution of the differences is approximately normal:
+```{r}
+#merging subjects' data
+dat_mutual <- merge(dat_mat,dat_por,by=c("school","sex","age","address","famsize","Pstatus","Medu","Fedu","Mjob","Fjob","reason","nursery","internet"))
+#grades' difference histogram
+ggplot(data = dat_mutual, aes(G3.x-G3.y)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle('Grades\' Difference Distribution') + theme(plot.title = element_text(hjust = 0.5)) + geom_density() + xlab('Grades\' Difference')
+```
+
+It seems like it can be approximated as a normal distribution.
+Now we will conduct a paired t-test:
+
+```{r}
+#paired t-test
+t.test(dat_mutual$G3.x,dat_mutual$G3.y,paired = TRUE)
+```
+
+We got a very low p-value so we reject the null hypotheses that the mean of the differences is zero.
+This result suggests that the two subjects should be analyzed seperately.
+
+Before we explore the data, we will divide it to 80% train and 20% test. The reason for this devision is that we want to test our model on a first time seen data (which the model wasn't trained on). The further exploration will be only on the train data. <br />
+Further more, when trying our data on our train data, before going to the test itself, in most of our models we used Caret's K-fold cross validation option. The idea is that we don't want to fit even the hyper parameters of a model, and even the decision to use a certain model, to the test data. So we divide our train to 5 random parts, and each time we train the model on 4 parts, and test the results on the fifth (we do this 5 times total). This way, we can get a good picture of our model's performance before using the test. <br />
+We will first handle the Math dataset and in later stages we will also handle the Portuguese dataset.
+```{r,echo=TRUE}
+#Data partition
+set.seed(1)
+train_idx <- createDataPartition(dat_mat$G3, p = 0.8, list = FALSE)
+math_train <- dat_mat[train_idx,]
+math_test <- dat_mat[-train_idx,]
+```
+
+
+To get a first impression of the relations between the different features, we created matrices of Pearson and Spearman correlations:
+
+```{r, echo=FALSE,fig.width=10,fig.align='center'}
+#Correlation Matrix - Pearson
+math_train_corr <- subset(math_train, select = -c(Fjob, Mjob,reason,guardian))
+inds <- sapply(math_train_corr, is.factor)
+math_train_corr[inds] <- lapply(math_train_corr[inds], function(x) as.numeric(as.factor(x)) - 1)
+
+cormat <- round(cor(math_train_corr),2)
+#head(cormat)
+library(reshape2)
+melted_cormat <- melt(cormat)
+#head(melted_cormat)
+library(ggplot2)
+#ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+#  geom_tile()
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+  # Get upper triangle of the correlation matrix
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+upper_tri <- get_upper_tri(cormat)
+#upper_tri
+library(reshape2)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Heatmap
+library(ggplot2)
+obj1 <- ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+
+
+#Correlation Matrix - Spearman
+math_train_corr <- subset(math_train, select = -c(Fjob, Mjob,reason,guardian))
+inds <- sapply(math_train_corr, is.factor)
+math_train_corr[inds] <- lapply(math_train_corr[inds], function(x) as.numeric(as.factor(x)) - 1)
+
+cormat <- round(cor(math_train_corr,method = "spearman"),2)
+#head(cormat)
+library(reshape2)
+melted_cormat <- melt(cormat)
+#head(melted_cormat)
+library(ggplot2)
+#ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+#  geom_tile()
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+  # Get upper triangle of the correlation matrix
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+upper_tri <- get_upper_tri(cormat)
+#upper_tri
+library(reshape2)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Heatmap
+library(ggplot2)
+obj2 <- ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Spearman\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+grid.arrange(obj1,obj2,nrow = 1, ncol = 2)
+
+```
+We should mention that we didn't include in these matrices categorical features which have more than two categories and are not ordinal.
+We included both types of correlation because Pearson correlation catches linear dependency between variables, and we want to use this for our linear model. Still, we want to also identify non-linear correlations that may have potential to help our predictions using more complicated models. The Spearman correlation asseses how well the relationship between two variables can be described using a monotonic function.
+
+Let's examine the results: The most important column is the rightmost - correlations of features with G3. We can see that G1 and G2 (past grades) are very correlated to G3. We can also see that failures is negatively correlated with G3, which makes sense.
+In addition, more interesting relations can be observed: Walc (weekend alcohol consumption) is correlated with Sex (male) and goout (level of going out with friends), and negatively correlated with study-time. 
+Another spicy relation: Medu (mother education level) and Fedu (father education level) are highly correlated - which means that usually married couples have a similar level of education.
+<font color="#548bc9">
+
+# Data Visualization
+</font>
+As indicated from the correlation matrices, G3 is highly correlated to G2 but not so much with absences.
+We can visualize this using scatter plots of the data (the plots are jittered so we can see all data points):
+```{r,echo=FALSE, fig.width=10,fig.align='center'}
+# #G1
+# obj <- ggplot(data = math_train, mapping = aes(x=G1, y=G3, col = 'red'))
+# obj + geom_jitter() + xlab('G1') + ylab('G3')  + ggtitle('G3 vs G1') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#G2
+g2 <- ggplot(data = math_train, mapping = aes(x=G2, y=G3)) + geom_jitter(col = 'red') + xlab('G2') + ylab('G3')  + ggtitle('G3 vs G2') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#Absences
+absences <- ggplot(data = math_train, mapping = aes(x=absences, y=G3)) + geom_jitter( col = 'red') + xlab('Absences') + ylab('G3')  + ggtitle('G3 vs Absences') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+grid.arrange(g2,absences,nrow = 1, ncol = 2)
+```
+<br /> Another parameter that has a slight correlation with G3 is the number of past failures parameter. We can see this using a boxplot:<br />
+```{r,echo=FALSE, fig.height=3.5, fig.width=8,fig.align='center'}
+cbPalette <- c("red","yellow","blue","green")
+# #Failures
+# obj <- ggplot(data = math_train, mapping = aes(x=failures, y=G3, color = factor(failures))) + xlab('Failures') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Failures jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+# obj
+failures_color <- factor(math_train$failures)
+obj2 <- ggplot(data = math_train,mapping = aes(x=factor(failures),y=G3)) + geom_boxplot(fill = cbPalette) + xlab('Failures')
+obj2
+
+#Failures Histograms
+tmp1 <- subset(math_train,failures == 0,select = G3)
+tmp2 <- subset(math_train,failures == 1,select = G3)
+tmp3 <- subset(math_train,failures == 2,select = G3)
+tmp4 <- subset(math_train,failures == 3,select = G3)
+
+```
+<br />
+Here are some parameters regarding this plot:
+<font color="#157515">
+```{r,echo=FALSE}
+data <- matrix(c(round(mean(tmp1$G3),2),round(mean(tmp2$G3),2),round(mean(tmp3$G3),2),round(mean(tmp4$G3),2),round(sd(tmp1$G3),2),round(sd(tmp2$G3),2),round(sd(tmp3$G3),2),round(sd(tmp4$G3),2),median(tmp1$G3),median(tmp2$G3),median(tmp3$G3),median(tmp4$G3)),ncol=4,nrow = 3,byrow=TRUE)
+colnames(data) <- c("0","1","2","more than 2")
+rownames(data) <- c("Mean","Std","Median")
+data <- as.table(data)
+data
+```
+</font>
+
+We see that the grades' median and mean decrease as the number of failures increase. In addition, where the number of failures is small, we barely have grades below five. This is not true for students with more than one failure.
+
+Visualizing the data is done to further understand and get a feel for it. Moreover, we wanted to identify non-linear patterns in order to use them for improving our model using proper transformations or by rearranging categories of categorical variables (for example, combining some of the categories). Unfortunately, we didn't recognize any interesting patterns with this procedure.
+Additional visualizations that we tried, can be observed in the .rmd file.
+```{r,echo=FALSE,eval=FALSE}
+#G1
+obj <- ggplot(data = math_train, mapping = aes(x=G1, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('G1') + ylab('G3')  + ggtitle('G3 vs G1') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#G2
+obj <- ggplot(data = math_train, mapping = aes(x=G2, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('G2') + ylab('G3')  + ggtitle('G3 vs G2') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#Absences
+obj <- ggplot(data = math_train, mapping = aes(x=absences, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('Absences') + ylab('G3')  + ggtitle('G3 vs Absences') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+cbPalette <- c("red","yellow","blue","black")
+#Studytime
+obj <- ggplot(data = math_train, mapping = aes(x=studytime, y=G3, color = factor(studytime)))
+obj +  xlab('Studytime') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Studytime jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Studytime Histograms
+tmp1 <- subset(math_train,studytime == 1,select = G3)
+tmp2 <- subset(math_train,studytime == 2,select = G3)
+tmp3 <- subset(math_train,studytime == 3,select = G3)
+tmp4 <- subset(math_train,studytime == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=1, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=2, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=3, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=4, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,nrow = 2, ncol = 2)
+
+#Higher
+higher_num <- as.numeric(math_train$higher)
+obj <- ggplot(data = math_train, mapping = aes(x=higher_num, y=G3, color = factor(higher)))
+obj +  xlab('Higher') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Higher jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Higher Histograms
+tmp1 <- subset(math_train,as.numeric(higher) == 1,select = G3) #No
+tmp2 <- subset(math_train,as.numeric(higher) == 2,select = G3) #Yes
+nrow(tmp1) # number of students that don't want higher education 
+nrow(tmp2) # number of students that want higher education
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('higher=No, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=2, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,nrow = 1, ncol = 2)
+
+#Failures
+obj <- ggplot(data = math_train, mapping = aes(x=failures, y=G3, color = factor(failures)))
+obj +  xlab('Failures') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Failures jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Failures Histograms
+tmp1 <- subset(math_train,failures == 0,select = G3)
+tmp2 <- subset(math_train,failures == 1,select = G3)
+tmp3 <- subset(math_train,failures == 2,select = G3)
+tmp4 <- subset(math_train,failures == 3,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,nrow = 2, ncol = 2)
+
+cbPalette <- c("red","yellow","blue","black","green")
+#Medu
+obj <- ggplot(data = math_train, mapping = aes(x=Medu, y=G3, color = factor(Medu)))
+obj +  xlab('Medu') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Medu jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Medu Histograms
+tmp1 <- subset(math_train,Medu == 0,select = G3)
+tmp2 <- subset(math_train,Medu == 1,select = G3)
+tmp3 <- subset(math_train,Medu == 2,select = G3)
+tmp4 <- subset(math_train,Medu == 3,select = G3)
+tmp5 <- subset(math_train,Medu == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj5 <- ggplot(data = tmp5, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=4, ' * mu * '=' * .(round(mean(tmp5$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp5$G3),2)) * ', med=' * .(median(tmp5$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,obj4,nrow = 3, ncol = 2)
+
+#Fedu
+obj <- ggplot(data = math_train, mapping = aes(x=Fedu, y=G3, color = factor(Fedu)))
+obj +  xlab('Fedu') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Fedu jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Failures Histograms
+tmp1 <- subset(math_train,Fedu == 0,select = G3)
+tmp2 <- subset(math_train,Fedu == 1,select = G3)
+tmp3 <- subset(math_train,Fedu == 2,select = G3)
+tmp4 <- subset(math_train,Fedu == 3,select = G3)
+tmp5 <- subset(math_train,Fedu == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj5 <- ggplot(data = tmp5, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=4, ' * mu * '=' * .(round(mean(tmp5$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp5$G3),2)) * ', med=' * .(median(tmp5$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,obj4,nrow = 3, ncol = 2)
+
+```
+
+<font color='#548bc9'>
+
+# Inference 
+</font>
+
+### Exhaustive Search
+
+Now, we will try to model our problem with a linear regression. In order to systematically choose the best combination of features for our model, we did an exhaustive search using the regsubsets function:<br />
+*We provided in the .rmd file another model that doesn't include G1,G2 so we will be able to make a comparison between the models performances. We will present here only the final results.
+
+
+```{r, echo = FALSE, warning=FALSE}
+#Regsubsets without G1 G2
+subsets_Gout <- regsubsets(G3 ~ . ,data = math_train[,c(-31,-32)], nvmax = 20)
+subsets_Gout_sum <- summary(subsets_Gout)
+```
+
+```{r,echo=FALSE,results='hide', warning=FALSE}
+#without G1 G2
+#-------------
+#get index of best adjr2
+best_adjr2_num_Gout <- which.max(subsets_Gout_sum$adjr2)
+#get best adjr2's value
+subsets_Gout_sum$adjr2[best_adjr2_num_Gout]
+#get coef values of the chosen model
+coef(subsets_Gout,best_adjr2_num_Gout)
+#data modification train
+math_train_mod_Gout=math_train
+math_train_mod_Gout$Mjob[math_train_mod_Gout$Mjob !='teacher'] <- 'other' 
+math_train_mod_Gout$reason[math_train_mod_Gout$reason !='other' & math_train_mod_Gout$reason !='reputation' ] <- 'home' 
+#data modification test
+math_test_mod_Gout=math_test
+math_test_mod_Gout$Mjob[math_test_mod_Gout$Mjob !='teacher'] <- 'other' 
+math_test_mod_Gout$reason[math_test_mod_Gout$reason !='other' & math_test_mod_Gout$reason !='reputation'] <- 'home'  
+#linear model 
+model_lr_reg_Gout <- lm(G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = math_train_mod_Gout)
+model_sum_Gout <- summary(model_lr_reg_Gout)
+# # #Same linear model using caret, to get CV RMSE - We didn't do this because there was a bug we discovered very late and we didn't have time to fix it.
+# set.seed(1)
+# model_lr_reg_Gout_CV <- train(G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = math_train_mod_Gout, method="lm")
+# #RMSE of CV
+# rmse_reg_Gout <- round(model_lr_reg_Gout_CV$results$RMSE,4)
+#RMSE
+rmse_reg_Gout <- round(model_sum_Gout$sigma,4)
+#adjr2
+adjr2_reg_Gout <- round(model_sum_Gout$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_reg_Gout <- round(shapiro.test(resid(model_lr_reg_Gout))$p.value,10)
+#Breusch-Pagan
+bp_reg_Gout <- round(bptest(model_lr_reg_Gout)$p.value,5)
+```
+```{r, echo = TRUE,warning=FALSE}
+#Regsubsets
+subsets <- regsubsets(G3 ~ . ,data = math_train, nvmax = 20)
+subsets_sum <- summary(subsets)
+```
+```{r,echo=FALSE, fig.align='center',fig.height=4,warning=FALSE}
+#with G1 G2
+#-------------
+#get index of best adjr2
+best_adjr2_num <- which.max(subsets_sum$adjr2)
+AdjR2 <- subsets_sum$adjr2
+#plotting adjr2 vs number of features
+obj1 <- ggplot(mapping = aes(x=c(1:20), y=subsets_sum$adjr2, color = AdjR2)) + geom_point() + xlab('Number of Features') + ylab('Adjusted R-Squared') 
+obj1 + geom_point(
+    data=data.frame(x=best_adjr2_num,y=subsets_sum$adjr2[best_adjr2_num]),
+    aes(x,y),
+    color="red",
+    size=4) + geom_text(aes(x=best_adjr2_num,y=subsets_sum$adjr2[best_adjr2_num],label = round(subsets_sum$adjr2[best_adjr2_num],4)),col = 'black',hjust=1.3, vjust=-0.3)
+```
+The above graph shows the Adjusted R-Squared (y axis) of the best model with a fix number of parameters (x axis).
+The best AdjR2 obtained was 0.8506 using a model with twelve features. The features and their coefficients are listed below:
+```{r}
+#get coef values of the chosen model
+coef(subsets,best_adjr2_num)
+```
+In some of the categorical variables, only few of the categories were included in the model, thus will modify the data accordingly:
+```{r, echo=TRUE,warning=FALSE}
+#With G1 G2
+#-----------
+#modify train
+math_train_modified=math_train
+math_train_modified$Fjob[math_train_modified$Fjob!='health' & 
+math_train_modified$Fjob!='services'] <- 'other'
+math_train_modified$reason[math_train_modified$reason!='home'] <- 'other' 
+math_train_modified$guardian[math_train_modified$guardian!='mother'] <- 'other'
+
+#modify test
+math_test_modified=math_test
+math_test_modified$Fjob[math_test_modified$Fjob!='health' & 
+math_test_modified$Fjob!='services'] <- 'other'
+math_test_modified$reason[math_test_modified$reason!='home'] <- 'other'
+math_test_modified$guardian[math_test_modified$guardian!='mother'] <- 'other'
+```
+
+### Model Diagnostics - Regsubsets
+After modifying our data, we will build a linear regression model and examine the results:<br />
+
+```{r,echo=TRUE,fig.align='center',fig.height=4,fig.width=10,warning=FALSE}
+#linear model 
+model_lr_regsubsets <- lm(G3 ~ absences + reason + Fjob + guardian + activities + G2
++ traveltime + studytime + failures + famrel + G1 ,data = math_train_modified)
+model_sum <- summary(model_lr_regsubsets)
+# #Same linear model using caret, to get CV RMSE - We didn't do this because there was a bug we discovered very late and we didn't have time to fix it.
+# set.seed(1)
+# model_lr_regsubsets_CV <- train(G3 ~ absences + reason + Fjob + guardian + activities + G2 + traveltime + studytime + failures + famrel + G1 ,data = math_train_modified, method="lm")
+# #RMSE of CV
+# rmse_regsubsets <- round(model_lr_regsubsets_CV$results$RMSE,4)
+#RMSE
+rmse_regsubsets <- round(model_sum$sigma,4)
+#adjr2
+adjr2_regsubsets <- round(model_sum$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_regsubsets <- round(shapiro.test(resid(model_lr_regsubsets))$p.value,20)
+#Breusch-Pagan
+bp_regsubsets <- round(bptest(model_lr_regsubsets)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(model_lr_regsubsets),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(model_lr_regsubsets),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(model_lr_regsubsets),resid(model_lr_regsubsets),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+```
+<br />
+RMSE = `r rmse_regsubsets`<br />
+Adj R-Squared = `r adjr2_regsubsets`<br />
+Shapiro's p-value = `r shapiro_regsubsets`<br />
+BP p-value = `r bp_regsubsets`<br />
+
+We should mention that we also tried different interactions between features but they turned out to be insignificant.
+__We will discuss the results:__<br />
+The 'Residuals vs Fitted' plot shows that there isn't a constant variance for the residuals since the residuals spread isn't equal for each fitted value. We can also see that the linearity assumption is invalid since there are fitted values which their residuals mean isn't zero. This observation is verified by the Breusch-Pagan test which its p-value is very low, meanning we should reject the null hypotheses of constant variance of the residuals.
+<br />Regarding the Q-Q plot, we notice that the graph is skewed, meaning that the residuals' quantiles differ from the theoretical quantiles of a normal distribution. We conclude the normality of the residuals assumption is violated. This is verified by the Shapiro-Wilk test which its p-value is very low, meanning we should reject the null hypotheses of normality of the residuals.
+
+According to the above model diagnostics, we will try to improve our model assumptions' validity.
+
+
+### Boxcox Transformation
+
+The AdjR2 and RMSE are not bad but the above observations suggest we should try other methods to improve them.
+In order to improve our model assumptions' validity, we will use a boxcox transformation:
+
+```{r, echo=FALSE,warning=FALSE}
+#finding lambda using boxcox without G1 G2
+model_boxcox_Gout <- boxcox(lm(G3+1 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences  ,data = math_train_mod_Gout), plotit = FALSE)
+lambda_Gout <- model_boxcox_Gout$x[which(model_boxcox_Gout$y==max(model_boxcox_Gout$y))]
+#making transformation with the given lambda without G1 G2
+boxcox_model_reg_Gout <- lm(((((G3+1)^lambda_Gout) - 1) / lambda_Gout) ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = math_train_mod_Gout)
+sum_cox_reg_Gout <- summary(boxcox_model_reg_Gout)
+#RMSE
+rmse_boxcox_Gout <- round(sum_cox_reg_Gout$sigma,4)
+#adjr2
+adjr2_boxcox_Gout <- round(sum_cox_reg_Gout$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_boxcox_Gout <- round(shapiro.test(resid(boxcox_model_reg_Gout))$p.value,5)
+#Breusch-Pagan
+bp_boxcox_Gout <- round(bptest(boxcox_model_reg_Gout)$p.value,5)
+```
+
+```{r, echo=TRUE,fig.align='center',fig.height=4,fig.width=10,warning=FALSE}
+#finding lambda using boxcox with G1 G2
+model_boxcox <- boxcox(lm(G3+1 ~ absences + reason + Fjob + guardian + activities + G2 + traveltime + studytime + failures + famrel + G1 ,data = math_train_modified), plotit = TRUE)
+#get lambda
+lambda <- model_boxcox$x[which(model_boxcox$y==max(model_boxcox$y))]
+lambda
+#making transformation with the given lambda with G1 G2
+boxcox_model_regsubsets <- lm(((((G3+1)^lambda) - 1) / lambda) ~ absences + reason + Fjob + guardian + activities + G2 + traveltime + studytime + failures + famrel + G1 ,data = math_train_modified)
+#Function which calculates RMSE
+calc_RMSE = function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+#Function which calculates AdjR2
+calc_AdjR2 = function(p,fitted,actual) {
+  n <- length(fitted)
+  SSReg <- sum((fitted-mean(actual))^2)
+  SST <- sum((actual-mean(actual))^2)
+  R2 <- SSReg / SST
+  AdjR2 <- 1 - (1 - R2) * ((n - 1) / (n - p - 1))
+  return(AdjR2)
+}
+#boxcox model's values transformed back to G3
+y=pmax(fitted(boxcox_model_regsubsets),0) #handle negative values
+y=((lambda*y+1)^(1/lambda))-1 
+#RMSE
+rmse_boxcox <- round(calc_RMSE(math_train_modified$G3,y),5)
+#AdjR2
+adjr2_boxcox <- round(calc_AdjR2(12,y,math_train_modified$G3),4)
+#Shapiro-Wilk
+shapiro_boxcox <- round(shapiro.test(resid(boxcox_model_regsubsets))$p.value,12)
+#Breusch-Pagan
+bp_boxcox <- round(bptest(boxcox_model_regsubsets)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(boxcox_model_regsubsets),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(boxcox_model_regsubsets),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(boxcox_model_regsubsets),resid(boxcox_model_regsubsets),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+```
+
+RMSE = `r rmse_boxcox`<br />
+Adj R-Squared = `r adjr2_boxcox`<br />
+Shapiro's p-value = `r shapiro_boxcox`<br />
+BP p-value = `r bp_boxcox`<br />
+
+__We will discuss the results:__<br />
+In comparison to the previous model, we managed to improve the constant variance and normality of the residuals assumptions since the p-values of Breusch-Pagan and Shapiro-Wilk tests are larger now.
+Although, the RMSE is slightly higher (and the adjusted r-squared is a little lower). The reason is because the boxcox transformation puts emphasis on making the residuals 'obey' our model assumptions. So we might end up with a model which its residuals are more normaly distributed and their variance is more constant, but the error could still get bigger (of course, this is not always the case).
+In the end, the most important thing for us as predictors is the RMSE, and therefore, if this will also be the case with the test data, we will prefer the original model.
+
+
+</font>
+
+### K-NN - Regression
+The next algorithm we tried is the K-Nearest Neighbors algorithm. This algorithm takes the K nearest neighbors of the new observation (measured by euclidean distance of the features) in the train and uses their average to predict the new observation's grade. 
+
+We tried several options of features to use in the K-NN model: All features, all features except non-ordinal categorical factors, and features chosen with the regsubsets function above (which may have more correlation with G3). We will present the option with the best results on the train - the third one (The rest can be found in the .rmd file).
+
+```{r, echo=FALSE,eval=FALSE}
+#K-nn regression with G1 G2
+#----------------------------
+
+set.seed(1)
+knn_reg_model = train( #All Features
+  G3 ~ .,
+  data = math_train,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results <- knn_reg_model$results
+#min RMSE's index
+min_rmse_indx <- which.min(knn_results$RMSE)
+rmse_knn <- round(knn_results$RMSE[min_rmse_indx],4)
+rmse_knn
+set.seed(1)
+knn_reg_model_ordOut = train( #All Features except non ordinal categorical variables
+  G3 ~ .,
+  data = math_train[,-c(9:12)],
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_ordOut <- knn_reg_model_ordOut$results
+#min RMSE's index
+min_rmse_indx_ordOut <- which.min(knn_results$RMSE)
+rmse_knn_ordOut <- round(knn_results_ordOut$RMSE[min_rmse_indx_ordOut],4)
+rmse_knn_ordOut
+```
+
+```{r,echo=FALSE}
+set.seed(1)
+knn_reg_model_reg = train( #Regsubsets Features with G1 G2
+  G3 ~ absences + reason + Fjob + guardian + activities + G2
++ traveltime + studytime + failures + famrel + G1 ,
+  data = math_train_modified,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_reg <- knn_reg_model_reg$results
+#min RMSE's index
+min_rmse_indx_reg <- which.min(knn_results_reg$RMSE)
+rmse_knn_reg <- round(knn_results_reg$RMSE[min_rmse_indx_reg],4)
+p_label_reg <- paste('(',knn_results_reg$k[min_rmse_indx_reg],',',
+               rmse_knn_reg,')',sep = '')
+#K-nn regression without G1 G2
+#-----------------------------
+set.seed(1)
+knn_reg_model_reg_Gout = train( #Regsubsets Features without G1 G2
+  G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences,
+  data = math_train_mod_Gout,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_reg_Gout <- knn_reg_model_reg_Gout$results
+#min RMSE's index
+min_rmse_indx_reg_Gout <- which.min(knn_results_reg_Gout$RMSE)
+rmse_knn_reg_Gout <- round(knn_results_reg_Gout$RMSE[min_rmse_indx_reg_Gout],4)
+```
+
+```{r, echo=TRUE,fig.align='center',fig.height=3.5,fig.width=8}
+#plot rmse vs k
+obj2 <- ggplot(data = knn_results_reg,mapping = aes(x = k,y = RMSE)) + geom_line()
+obj2 + geom_point(data=knn_results_reg,aes(x = k[min_rmse_indx_reg],y = RMSE[min_rmse_indx_reg]),color="red",size=4) +
+geom_text(data=knn_results_reg, mapping = aes(x = k[min_rmse_indx_reg],
+  y =  RMSE[min_rmse_indx_reg],label=p_label_reg),hjust=-0.2, vjust=0.32) +
+ggtitle('RMSE vs k') + theme(plot.title = element_text(hjust = 0.5))
+```
+We chose the model with the lowest RMSE. The best model was obtained for K=10.
+
+### Regression - Summary Table
+```{r, echo=FALSE,results='hide'}
+#TEST RMSE
+#Function which calculates RMSE
+calc_RMSE = function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+#RMSE for regsubsets lm model with G1 G2
+rmse_test_reg <- round(calc_RMSE(math_test_modified$G3,predict(model_lr_regsubsets,newdata=math_test_modified)),5)
+#RMSE for regsubsets lm model without G1 G2
+rmse_test_reg_Gout <- round(calc_RMSE(math_test_mod_Gout$G3,predict(model_lr_reg_Gout,newdata=math_test_mod_Gout)),5)
+#RMSE for boxcox model with G1 G2
+y=pmax(predict(boxcox_model_regsubsets,newdata=math_test_modified),0)
+y=((lambda*y+1)^(1/lambda))-1
+rmse_test_boxcox <- round(calc_RMSE(math_test_modified$G3,y),5)
+#RMSE for boxcox model without G1 G2
+y=pmax(predict(boxcox_model_reg_Gout,newdata=math_test_mod_Gout),0)
+y=((lambda_Gout*y+1)^(1/lambda_Gout))-1
+rmse_test_boxcox_Gout <- round(calc_RMSE(math_test_mod_Gout$G3,y),5)
+#RMSE for knn lm model with G1 G2
+rmse_test_knn <- round(calc_RMSE(math_test$G3,predict(knn_reg_model_reg,newdata=math_test)),5)
+#RMSE for regsubsets lm model without G1 G2
+rmse_test_knn_Gout <- round(calc_RMSE(math_test$G3,predict(knn_reg_model_reg_Gout,newdata=math_test)),5)
+```
+```{r,echo=FALSE}
+math_regression_best_G_KNN_train <- rmse_knn_reg
+math_regression_best_NoG_KNN_train <- rmse_knn_reg_Gout
+math_regression_best_G_KNN_test <- rmse_test_knn
+math_regression_best_NoG_KNN_test <- rmse_test_knn_Gout
+
+r_names <- c('Regsubsets*','Regsubsets**','Boxcox*','Boxcox**','KNN*','KNN**')
+RMSE <- c(rmse_regsubsets,rmse_reg_Gout,rmse_boxcox,rmse_boxcox_Gout,rmse_knn_reg,rmse_knn_reg_Gout)
+AdjR2<- c(as.character(adjr2_regsubsets),as.character(adjr2_reg_Gout),as.character(adjr2_boxcox),as.character(adjr2_boxcox_Gout),'-','-')
+Shapiro <- c(as.character(shapiro_regsubsets),as.character(shapiro_reg_Gout),as.character(shapiro_boxcox),as.character(shapiro_boxcox_Gout),'-','-')
+BP <- c(as.character(bp_regsubsets),as.character(bp_reg_Gout),as.character(bp_boxcox),as.character(bp_boxcox_Gout),'-','-')
+Test_RMSE <- c(rmse_test_reg,rmse_test_reg_Gout,rmse_test_boxcox,rmse_test_boxcox_Gout,rmse_test_knn,rmse_test_knn_Gout)
+summary_data <- data.frame(RMSE,AdjR2,Shapiro,BP,Test_RMSE,row.names = r_names)
+kable(summary_data,digits = c(4,4,19,7))  %>%
+  kable_styling()
+```
+\* - Including G1,G2 in the model<br />
+\*\* - Not including G1,G2 in the model
+
+We can see that the K-NN model has the best results, with and without using G1 and G2.
+
+
+### Combining Classification and Linear Regression
+The results we saw in the early visualisations and diagnostics plots suggest that the students with a zero grade might hurt our regression models. We can try a different approach - first classify if the observed student is with zero grade or not, and if not - predict his grade between 1 and 20. 
+Let's start with the classifier: 
+
+
+```{r,echo=TRUE}
+#Modify data to include 0/'not zero' in G3
+math_train_zero <- math_train
+math_train_zero$G3[which(math_train_zero$G3>0)] <- "not zero" 
+math_test_zero <- math_test
+math_test_zero$G3[which(math_test_zero$G3>0)] <- "not zero" 
+#train classifier
+set.seed(1)
+knn_class_zero = train( #Regsubsets Features with G1 G2
+  form = G3 ~ .,
+  data = math_train_zero,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+best_acc_idx <- which.max(knn_class_zero$results$Accuracy)
+acc_knn_train <- max(knn_class_zero$results$Accuracy)
+acc_knn_train
+k_knn_train <- knn_class_zero$results$k[best_acc_idx]
+k_knn_train
+```
+First, we modified the G3 column to 0 or not. we trained a knn classifier which achieved the above accuracy.
+Next, we will filter the rows where G3 isn't 0 and we will train a linear regression model using regsubsets function:
+
+```{r,echo=TRUE}
+#create dataset without zero
+math_train_zout <- math_train[which(math_train$G3 != 0),]
+#Regsubsets with G1,G2
+subsets_zout <- regsubsets(G3 ~ . ,data = math_train_zout, nvmax = 20)
+subsets_zout_sum <- summary(subsets_zout)
+#get index of best adjr2
+best_adjr2_zout <- which.max(subsets_zout_sum$adjr2)
+#get best adjr2's value
+subsets_zout_sum$adjr2[best_adjr2_zout]
+#get coef values of the chosen model
+coef(subsets_zout,best_adjr2_zout)
+```
+We modified our data according to the regsubsets best model's parameters. After doing so, we trained a linear model on the modified data:
+```{r,echo=FALSE}
+#modified train data (with zero)
+math_train_class_reg_mod=math_train
+math_train_class_reg_mod$Mjob[math_train_class_reg_mod$Mjob !='other'] <- 'teacher'
+math_train_class_reg_mod$Fjob[math_train_class_reg_mod$Fjob !='health' & math_train_class_reg_mod$Fjob !='other' & math_train_class_reg_mod$Fjob !='teacher'] <- 'services'
+math_train_class_reg_mod$reason[math_train_class_reg_mod$reason!='home'] <- 'other'
+math_train_class_reg_mod$guardian[math_train_class_reg_mod$guardian!='other'] <- 'mother'
+#modified test data (with zero)
+math_test_class_reg_mod=math_test
+math_test_class_reg_mod$Mjob[math_test_class_reg_mod$Mjob !='other'] <- 'teacher'
+math_test_class_reg_mod$Fjob[math_test_class_reg_mod$Fjob !='health' & math_test_class_reg_mod$Fjob !='other' & math_test_class_reg_mod$Fjob !='teacher'] <- 'services' 
+math_test_class_reg_mod$reason[math_test_class_reg_mod$reason!='home'] <- 'other'
+math_test_class_reg_mod$guardian[math_test_class_reg_mod$guardian!='other'] <- 'mother'
+#modify train
+math_train_zout_mod=math_train_zout
+math_train_zout_mod$Mjob[math_train_zout_mod$Mjob !='other'] <- 'teacher'
+math_train_zout_mod$Fjob[math_train_zout_mod$Fjob !='health' & math_train_zout_mod$Fjob !='other' & math_train_zout_mod$Fjob !='teacher'] <- 'services' 
+math_train_zout_mod$reason[math_train_zout_mod$reason!='home'] <- 'other'
+math_train_zout_mod$guardian[math_train_zout_mod$guardian!='other'] <- 'mother'
+#modify test
+math_test_zout <- math_test[which(math_test$G3 != 0),]
+math_test_zout_mod=math_test_zout
+math_test_zout_mod$Mjob[math_test_zout_mod$Mjob !='other'] <- 'teacher'
+math_test_zout_mod$Fjob[math_test_zout_mod$Fjob !='health' & math_test_zout_mod$Fjob !='other' & math_test_zout_mod$Fjob !='teacher'] <- 'services' 
+math_test_zout_mod$reason[math_test_zout_mod$reason!='home'] <- 'other'
+math_test_zout_mod$guardian[math_test_zout_mod$guardian!='other'] <- 'mother' <- 'other'
+```
+```{r,echo=TRUE,fig.align='center',fig.height=4,fig.width=10}
+#lm regsubsets zout with G1,G2
+reg_zout <- lm(G3 ~ address + Mjob + Fjob + guardian + reason + G2
++ schoolsup + paid + nursery + famrel + G1 + goout + health ,data = math_train_zout_mod)
+reg_zout_sum <- summary(reg_zout)
+#RMSE
+rmse_reg_zout <- round(reg_zout_sum$sigma,4)
+#adjr2
+adjr2_reg_zout <- round(reg_zout_sum$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_reg_zout <- round(shapiro.test(resid(reg_zout))$p.value,20)
+#Breusch-Pagan
+bp_reg_zout <- round(bptest(reg_zout)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(reg_zout),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(reg_zout),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(reg_zout),resid(reg_zout),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+```
+RMSE = `r rmse_reg_zout`<br />
+Adj R-Squared = `r adjr2_reg_zout`<br />
+Shapiro's p-value = `r shapiro_reg_zout`<br />
+BP p-value = `r bp_reg_zout`<br />
+
+The results look good. The QQ plot and the fitted vs residuals plot both look a lot better than before, and the p-values of the SW and BP tests verify that - we cannot reject the null hypothesis of constant variance and normaility of residuals.
+*The above RMSE and adjusted R-squared were calculated only on the non-zero observations (which the linear model was trained on).
+Next, we will calculate the total RMSE of the combined model:
+
+```{r}
+set.seed(1)
+#rmse train classifier
+rmse_knn_class_train1 <- sum(math_train$G3[fitted(knn_class_zero) == 0] ^ 2)
+#rmse train linear reg
+rmse_reg_train2 <- sum((predict(reg_zout,newdata=math_train_class_reg_mod)[fitted(knn_class_zero) != 0] - math_train_class_reg_mod$G3[fitted(knn_class_zero) != 0]) ^ 2)
+#total train rmse
+rmse_train_class_reg <- sqrt((rmse_knn_class_train1+rmse_reg_train2)/nrow(math_train))
+rmse_train_class_reg
+```
+In Conclusion, in this model we see an overall improvement. Both classifier and the linear regression model show good diagnostics. Although, when we try it on the test data we see a different picture:
+
+```{r,echo=TRUE}
+set.seed(1)
+#predictions
+knn_class_zero_fit <- predict(knn_class_zero,newdata = math_test_zero)
+reg_zout_fit <- predict(reg_zout,newdata=math_test_class_reg_mod[knn_class_zero_fit != 0,])
+#accuracy calculation function
+calc_acc = function(actual, predicted) {
+  mean(actual == predicted)
+}
+#classifier accuracy
+acc_knn_test <- calc_acc(math_test_zero$G3,knn_class_zero_fit)
+acc_knn_test
+#rmse test classifier
+rmse_knn_class_test1 <- sum(math_test$G3[knn_class_zero_fit == 0] ^ 2)
+rmse_knn_class_test1
+#rmse test linear reg
+rmse_reg_test2 <- sum((reg_zout_fit - math_test$G3[knn_class_zero_fit != 0]) ^ 2)
+#total test rmse
+rmse_test_class_reg <- sqrt((rmse_knn_class_test1+rmse_reg_test2)/nrow(math_test))
+rmse_test_class_reg
+```
+The accuracy of the classifier is very good, and as we saw, the linear regression model also looks good, but the overall RMSE got bigger! We can also see that the RMSE of the grades mistakenly classified as zero by the classifier is zero.
+We tried to come up with an explanation for this and eventually decided to check the grades that the linear model predicted for the cases where the classifier classified incorrectly as 'not zero': 
+
+```{r,echo=TRUE}
+#all test data that classifier predicted as != 0
+class_not_zero <- math_test_class_reg_mod[knn_class_zero_fit != 0,]
+#predictions of linear reg where classifier predicted != 0 but actual is zero
+reg_zout_fit[class_not_zero$G3 == 0]
+```
+These predictions are far from their real value (which is 0), therefore we believe that the error increased due to this false predictions.As we saw, the accuracy of the classifier was indeed good, on the test too, but these very few mistakes were significant and lowerd the performance of the total regressor. 
+
+### New Approach: Classification
+We decided to try a slightly easier task, and see how we can deal with it.<br />
+We divided the data into four categories (which are ranges of grades), and we will try to predict the category of each student. First, we modified our data, and partitioned it again into train and test using caret, to make sure the distribution of the categories between train and test will be similar: 
+```{r,echo=TRUE,cache=TRUE}
+#Classification of 4 categories
+G3_4Class <- vector('numeric',nrow(dat_mat))
+# grades 0-5
+G3_4Class[which(dat_mat$G3<=5)] <- 'D' 
+# grades 6-10
+G3_4Class[which(dat_mat$G3>5 & dat_mat$G3<=10)] <- 'C' 
+# grades 11-15
+G3_4Class[which(dat_mat$G3>10 & dat_mat$G3<=15)] <- 'B' 
+# grades 16-20
+G3_4Class[which(dat_mat$G3>15 & dat_mat$G3<=20)] <- 'A' 
+math_Class <- cbind(dat_mat[,-33],G3Class=G3_4Class)
+kable(head(math_Class))  %>%
+  kable_styling() %>%  scroll_box(width = "800px", height = "180px")
+```
+
+```{r, echo=FALSE}
+#Data partition
+set.seed(3)
+train_idx_class <- createDataPartition(math_Class$G3Class, p = 0.8, list = FALSE)
+math_train_Class <- math_Class[train_idx_class,]
+math_test_Class <- math_Class[-train_idx_class,]
+```
+
+
+Next, we wanted to see the distribution of the different categories, and also check what is the most common category:
+```{r,fig.align='center',fig.height=4,fig.width=10}
+#get count for each class
+classes_table <- table(math_train_Class$G3Class)
+#calculate B class percentage
+B_perc <- round(classes_table[[2]] / nrow(math_train_Class) * 100,2)
+#percentage 
+histogram(math_train_Class$G3Class,frequency = TRUE,main = paste('Percentage of B grade is',B_perc),xlab = 'Grades')
+```
+<br /><font color='red'>
+**Note!** 
+</font><br /> By predicting only Grade B, we will get almost 43% accuracy level. We hope we will achieve better results than this 'dumb' classifier. 
+
+### K-NN Classification
+So now that we have some kind of a reference for a good model (accuracy level above 43%), we can  try and train some classification models. We will start by training a K-NN model.<br />
+
+As we did with the K-NN regression, we tried several options of features to use in the K-NN classification model: All features, all features except non-ordinal categorical factors, and features chosen with the regsubsets function above (which may have more correlation with G3). We will present the option with the best results on the train - again the third one (The rest can be found in the .rmd file).
+```{r,echo=FALSE,warning=FALSE}
+#With G1 G2
+#-----------
+#modify train
+math_train_Class_modified=math_train_Class
+math_train_Class_modified$Fjob[math_train_Class_modified$Fjob!='health' & 
+math_train_Class_modified$Fjob!='services'] <- 'other'
+math_train_Class_modified$reason[math_train_Class_modified$reason!='home'] <- 'other' 
+math_train_Class_modified$guardian[math_train_Class_modified$guardian!='mother'] <- 'other'
+
+#modify test
+math_test_Class_modified=math_test_Class
+math_test_Class_modified$Fjob[math_test_Class_modified$Fjob!='health' & 
+math_test_Class_modified$Fjob!='services'] <- 'other'
+math_test_Class_modified$reason[math_test_Class_modified$reason!='home'] <- 'other'
+math_test_Class_modified$guardian[math_test_Class_modified$guardian!='mother'] <- 'other'
+
+#without G1 G2
+#--------------
+#data modification train
+math_train_Class_mod_Gout=math_train_Class
+math_train_Class_mod_Gout$Mjob[math_train_Class_mod_Gout$Mjob !='teacher'] <- 'other' 
+math_train_Class_mod_Gout$reason[math_train_Class_mod_Gout$reason !='other' & math_train_Class_mod_Gout$reason !='reputation' ] <- 'home' 
+#data modification test
+math_test_Class_mod_Gout=math_test_Class
+math_test_Class_mod_Gout$Mjob[math_test_Class_mod_Gout$Mjob !='teacher'] <- 'other' 
+math_test_Class_mod_Gout$reason[math_test_Class_mod_Gout$reason !='other' & math_test_Class_mod_Gout$reason !='reputation'] <- 'home'
+ 
+```
+
+
+
+
+```{r,echo=FALSE,fig.align='center',fig.height=3.5,fig.width=8,warning=FALSE}
+#with G1 G2
+#--------------
+#K-NN Regsubsets features
+set.seed(1)
+knn_class_model_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model
+knn_results_Class <- knn_class_model_reg$results
+#max Accuracy's index
+max_Accuracy_indx <- which.max(knn_results_Class$Accuracy)
+Accuracy_knn <- round(knn_results_Class$Accuracy[max_Accuracy_indx],3)
+p_label_C <- paste('(',knn_results_Class$k[max_Accuracy_indx],',',
+              Accuracy_knn,')',sep = '')
+#plot rmse vs k
+objKnn <- ggplot(data = knn_results_Class,mapping = aes(x = k,y = Accuracy)) + geom_line() + geom_point(data=knn_results_Class,aes(x = k[max_Accuracy_indx],y = Accuracy_knn),color="red",size=4) +
+geom_text(data=knn_results_Class, mapping = aes(x = k[max_Accuracy_indx],
+  y =  Accuracy_knn,label=p_label_C),hjust=-0.2, vjust=0.32) +
+ggtitle('Accuracy vs k') + theme(plot.title = element_text(hjust = 0.5))
+
+#CM
+set.seed(1)
+predTest <- predict(knn_class_model_reg, newdata = math_test_Class_modified)
+
+confusion_matrix_rf <- as.data.frame(table(predTest, math_test_Class$G3Class))
+
+
+obj2 <- ggplot(data = confusion_matrix_rf,
+       mapping = aes(x = predTest,
+                     y = Var2)) +
+  geom_tile(aes(fill = Freq)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide = "legend") 
+
+grid.arrange(objKnn,obj2,nrow = 1, ncol = 2)
+
+```
+
+The best model holds an accuracy level of 81% on the train (using CV) and obtained by using k = 13.<br />
+The confusion matrix helps us to see the number of occurrences for each actual-predicted case, in the test.<br />
+We see that most of the classifier's wrong predictions happened between 'close' categories (A-B, B-C, C-D) and there isn't even one case where it confused between 'far' categories (A-D, A-C, B-D). This is good - even when we are wrong, it is a 'small' mistake.<br />
+The total test accuracy is:
+```{r,echo=FALSE,fig.align='center',fig.height=3.5,fig.width=8,warning=FALSE}
+
+knn_class_model_reg_Acc_Test <- calc_acc(actual = math_test_Class$G3Class, predicted = predTest)
+
+knn_class_model_reg_Acc_Test
+```
+
+```{r,echo=FALSE,eval=FALSE,warning=FALSE}
+#All three models of K-NN
+#with G1 G2
+#--------------
+#K-NN Regsubsets features
+set.seed(1)
+knn_class_model_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+knn_class_model_reg_Acc_Train <- max(knn_class_model_reg$results$Accuracy)
+
+#K-NN All features
+set.seed(1)
+knn_class_model <- train(
+  form = G3Class ~ .,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model
+
+knn_class_model_Acc_Train <- max(knn_class_model$results$Accuracy)
+
+#K-NN All Features except non ordinal categorical variables
+set.seed(1)
+knn_class_model_ordOut = train( #All Features except non ordinal categorical variables
+  G3Class ~ .,
+  data = math_train_Class[,-c(9:12)],
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+)
+
+knn_class_model_ordOut_Acc_Train <- max(knn_class_model_ordOut$results$Accuracy)
+
+#K-NN No G
+#All Features
+set.seed(1)
+knn_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_Acc_Train <- max(knn_class_model_NoG$results$Accuracy)
+
+knn_class_model_NoG_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+                                         predicted = predict(knn_class_model_NoG, newdata = math_test_Class))
+
+#All Features except non ordinal categorical variables
+set.seed(1)
+knn_class_model_NoG_ordOut <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = math_train_Class[,-c(9:12)],
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_ordOut_Acc_Train <- max(knn_class_model_NoG_ordOut$results$Accuracy)
+
+knn_class_model_NoG_ordOut_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+                                         predicted = predict(knn_class_model_NoG_ordOut, newdata = math_test_Class))
+#regsubsets features
+set.seed(1)
+knn_class_model_NoG_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + traveltime + studytime + failures + famrel,
+  data = math_train_Class_mod_Gout,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_reg_Acc_Train <- max(knn_class_model_NoG_reg$results$Accuracy)
+
+knn_class_model_NoG_reg_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+                                         predicted = predict(knn_class_model_NoG_reg, newdata = math_test_Class_mod_Gout))
+
+```
+
+### Random Forest Classification
+The next classification method we tried is 'Random Forest'. This is a method which uses decision trees in order to classify. But it uses lots of decision trees, and for every tree it uses only some random part of the observations, and also some random part of the features. Then an averaging of all predictions is done.  In this way, it (hopefully) prevents overfitting. <br />
+
+Here we tried two models: All features and features chosen with the regsubsets function above. We will present the model with the best results on the train (the second one):
+```{r,fig.align='center'}
+#regsubsets features
+set.seed(1)
+rf_class_model_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy <- round(max(rf_class_model_reg$results$Accuracy),5)
+
+
+```
+Accuracy on the train: `r rf_accuracy` <br />
+Let's check the confusion matrix and accuracy on the test data:
+
+```{r,fig.align='center'}
+#CM
+set.seed(1)
+predTest <- predict(rf_class_model_reg, newdata = math_test_Class_modified)
+
+confusion_matrix_rf <- as.data.frame(table(predTest, math_test_Class$G3Class))
+
+
+ggplot(data = confusion_matrix_rf,
+       mapping = aes(x = predTest,
+                     y = Var2)) +
+  geom_tile(aes(fill = Freq)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide = "legend") 
+
+rf_class_model_reg_Acc_Test <- calc_acc(actual = math_test_Class$G3Class, predicted = predTest)
+
+rf_class_model_reg_Acc_Test
+```
+Again, we can see that the mistakes were all of close categories. Also, the final test accuracy is satisfactory.
+
+
+```{r,echo=FALSE,eval=FALSE,warning=FALSE}
+#All two models of K-NN
+#with G1 G2
+#--------------
+#RF Regsubsets features
+set.seed(1)
+rf_class_model_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy <- round(max(rf_class_model_reg$results$Accuracy),5)
+
+#RF All features
+set.seed(1)
+rf_class_model <- train(
+  form = G3Class ~ .,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_all <- round(max(rf_class_model$results$Accuracy),5)
+
+#No G1 G2
+#--------------
+#RF Regsubsets features
+set.seed(1)
+rf_class_model_NoG_reg <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities 
+  + traveltime + studytime + failures + famrel,
+  data = math_train_Class_mod_Gout,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_NoG <- round(max(rf_class_model_NoG_reg$results$Accuracy),5)
+
+#RF All features
+set.seed(1)
+rf_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_all_NoG <- round(max(rf_class_model_NoG$results$Accuracy),5)
+
+```
+
+### Logistic Regression - One vs All
+One last classification method we tried is Logistic Regression. But as we have learned, this method is for binary classifications, and we have 4 categories. <br />
+We decided to train four LR classifiers, one for each category, and choose the final prediction by picking the category of the classifier which predicted it belongs to its category with the largest probability.
+We created 4 new data sets, each with the G3 column changed to A or not, B or not etc...<br />
+We trained the LR models using glm with binomial family, and then applied backward search to each classifier in order to automatically pick the coefficients which best match the data.
+```{r,echo=FALSE,fig.align='center',fig.height=3.5,warning=FALSE}
+#LR 1vsAll
+ova_Acc_Train <- vector('numeric',5)
+for(i in c(1:5)){
+#Data partition
+set.seed(i)
+train_idx_ova <- createDataPartition(math_train_Class$G3Class, p = 0.7, list = FALSE)
+inner_train <- math_train_Class[train_idx_ova,]
+inner_test <- math_train_Class[-train_idx_ova,]
+#inner train
+math_train_inner_Excellent <- inner_train
+math_train_inner_Excellent$G3Class <- ifelse(inner_train$G3Class != 'A','Other','A')
+math_train_inner_Good <- inner_train
+math_train_inner_Good$G3Class <- ifelse(inner_train$G3Class != 'B','Other','B')
+math_train_inner_Bad <- inner_train
+math_train_inner_Bad$G3Class <- ifelse(inner_train$G3Class != 'C','Other','C')
+math_train_inner_Fail <- inner_train
+math_train_inner_Fail$G3Class <- ifelse(inner_train$G3Class != 'D','Other','D')
+#inner test
+math_test_inner_Excellent <- inner_test
+math_test_inner_Excellent$G3Class <- ifelse(inner_test$G3Class != 'A','Other','A')
+math_test_inner_Good <- inner_test
+math_test_inner_Good$G3Class <- ifelse(inner_test$G3Class != 'B','Other','B')
+math_test_inner_Bad <- inner_test
+math_test_inner_Bad$G3Class <- ifelse(inner_test$G3Class != 'C','Other','C')
+math_test_inner_Fail <- inner_test
+math_test_inner_Fail$G3Class <- ifelse(inner_test$G3Class != 'D','Other','D')
+#train model on inner train data
+set.seed(1)
+glm_class_model_A <- glm(as.factor(G3Class) ~ ., data = math_train_inner_Excellent, family = binomial)
+glm_class_model_A = step(glm_class_model_A, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Excellent, glm_class_model_A, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_B <- glm(as.factor(G3Class) ~ ., data = math_train_inner_Good, family = binomial)
+glm_class_model_B = step(glm_class_model_B, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Good, glm_class_model_B, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_C <- glm(as.factor(G3Class) ~ ., data = math_train_inner_Bad, family = binomial)
+glm_class_model_C = step(glm_class_model_C, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Bad, glm_class_model_C, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_D <- glm(as.factor(G3Class) ~ ., data = math_train_inner_Fail, family = binomial)
+glm_class_model_D = step(glm_class_model_D, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Fail, glm_class_model_D, K = 5)$delta[1]
+
+A_Train <- 1 - predict(glm_class_model_A,newdata = math_test_inner_Excellent, type = "response")
+B_Train <- 1 - predict(glm_class_model_B,newdata = math_test_inner_Good, type = "response")
+C_Train <- 1 - predict(glm_class_model_C,newdata = math_test_inner_Bad, type = "response")
+D_Train <- 1 - predict(glm_class_model_D,newdata = math_test_inner_Fail, type = "response")
+lr_ABCD_Train <- cbind(A_Train,B_Train,C_Train,D_Train)
+
+classes_names <- c('A','B','C','D')
+finalPredictions_inner_Train <- classes_names[max.col(lr_ABCD_Train)]
+
+ova_Acc_Train[i] <- round(mean(finalPredictions_inner_Train==inner_test$G3Class),5)
+}
+ova_Acc_Train <- mean(ova_Acc_Train)
+
+#train model on all train data
+#all train
+math_train_Class_Excellent <- math_train_Class
+math_train_Class_Excellent$G3Class <- ifelse(math_train_Class$G3Class != 'A','Other','A')
+math_train_Class_Good <- math_train_Class
+math_train_Class_Good$G3Class <- ifelse(math_train_Class$G3Class != 'B','Other','B')
+math_train_Class_Bad <- math_train_Class
+math_train_Class_Bad$G3Class <- ifelse(math_train_Class$G3Class != 'C','Other','C')
+math_train_Class_Fail <- math_train_Class
+math_train_Class_Fail$G3Class <- ifelse(math_train_Class$G3Class != 'D','Other','D')
+#all test
+math_test_Class_Excellent <- math_test_Class
+math_test_Class_Excellent$G3Class <- ifelse(math_test_Class$G3Class != 'A','Other','A')
+math_test_Class_Good <- math_test_Class
+math_test_Class_Good$G3Class <- ifelse(math_test_Class$G3Class != 'B','Other','B')
+math_test_Class_Bad <- math_test_Class
+math_test_Class_Bad$G3Class <- ifelse(math_test_Class$G3Class != 'C','Other','C')
+math_test_Class_Fail <- math_test_Class
+math_test_Class_Fail$G3Class <- ifelse(math_test_Class$G3Class != 'D','Other','D')
+
+set.seed(1)
+glm_class_model_A <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Excellent, family = binomial)
+glm_class_model_A = step(glm_class_model_A, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Excellent, glm_class_model_A, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_B <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Good, family = binomial)
+glm_class_model_B = step(glm_class_model_B, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Good, glm_class_model_B, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_C <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Bad, family = binomial)
+glm_class_model_C = step(glm_class_model_C, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Bad, glm_class_model_C, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_D <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Fail, family = binomial)
+glm_class_model_D = step(glm_class_model_D, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Fail, glm_class_model_D, K = 5)$delta[1]
+
+A_test <- 1 - predict(glm_class_model_A,newdata = math_test_Class_Excellent , type = "response")
+B_test <- 1 - predict(glm_class_model_B,newdata = math_test_Class_Good , type = "response")
+C_test <- 1 - predict(glm_class_model_C,newdata = math_test_Class_Bad , type = "response")
+D_test <- 1 - predict(glm_class_model_D,newdata = math_test_Class_Fail , type = "response")
+lr_ABCD_test <- cbind(A_test,B_test,C_test,D_test)
+
+finalPredictions_test <- classes_names[max.col(lr_ABCD_test)]
+
+LR_class_model_Acc_Test <- mean(finalPredictions_test==math_test_Class$G3Class)
+
+confusion_matrix_ova <- as.data.frame(table(finalPredictions_test, math_test_Class$G3Class))
+
+ggplot(data = confusion_matrix_ova,
+       mapping = aes(x = finalPredictions_test,
+                     y = Var2)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_tile(aes(fill = Freq)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide="legend") 
+
+```
+Accuracy on the train: `r ova_Acc_Train` <br />
+Accuracy on the test: `r LR_class_model_Acc_Test` <br />
+Again, we see the mistakes are of close categories, which is good, but we have seen better overall results.
+
+### Classification - Summary Table
+```{r,echo=FALSE,warning=FALSE}
+#K-NN Regsubsets features
+set.seed(1)
+knn_class_model <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+
+knn_class_model_Acc_Train <- max(knn_class_model$results$Accuracy)
+
+knn_class_model_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+         predicted = predict(knn_class_model, newdata = math_test_Class_modified))
+
+#K-NN No G All features
+set.seed(1)
+knn_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+
+
+knn_class_model_NoG_Acc_Train <- max(knn_class_model_NoG$results$Accuracy)
+
+knn_class_model_NoG_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+         predicted = predict(knn_class_model_NoG, newdata = math_test_Class))
+
+#RF Regsubsets features
+set.seed(1)
+rf_class_model <- train(
+  form = G3Class ~ absences + reason + Fjob + guardian + activities + G2
+  + traveltime + studytime + failures + famrel + G1,
+  data = math_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_class_model_Acc_Train <- max(rf_class_model$results$Accuracy)
+
+rf_class_model_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+         predicted = predict(rf_class_model, newdata = math_test_Class_modified))
+
+#RF No G All features
+set.seed(1)
+rf_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = math_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_class_model_NoG_Acc_Train <- max(rf_class_model_NoG$results$Accuracy)
+
+rf_class_model_NoG_Acc_Test <- calc_acc(actual = math_test_Class$G3Class,
+         predicted = predict(rf_class_model_NoG, newdata = math_test_Class))
+
+#LR 1vsAll
+math_train_Class_Excellent <- math_train_Class
+math_train_Class_Excellent$G3Class <- ifelse(math_train_Class$G3Class != 'A','Other','A')
+math_train_Class_Good <- math_train_Class
+math_train_Class_Good$G3Class <- ifelse(math_train_Class$G3Class != 'B','Other','B')
+math_train_Class_Bad <- math_train_Class
+math_train_Class_Bad$G3Class <- ifelse(math_train_Class$G3Class != 'C','Other','C')
+math_train_Class_Fail <- math_train_Class
+math_train_Class_Fail$G3Class <- ifelse(math_train_Class$G3Class != 'D','Other','D')
+
+set.seed(1)
+glm_class_model_A <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Excellent, family = binomial)
+glm_class_model_A = step(glm_class_model_A, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Excellent, glm_class_model_A, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_B <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Good, family = binomial)
+glm_class_model_B = step(glm_class_model_B, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Good, glm_class_model_B, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_C <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Bad, family = binomial)
+glm_class_model_C = step(glm_class_model_C, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Bad, glm_class_model_C, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_D <- glm(as.factor(G3Class) ~ ., data = math_train_Class_Fail, family = binomial)
+glm_class_model_D = step(glm_class_model_D, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Fail, glm_class_model_D, K = 5)$delta[1]
+
+A_Train <- 1 - predict(glm_class_model_A, type = "response")
+B_Train <- 1 - predict(glm_class_model_B, type = "response")
+C_Train <- 1 - predict(glm_class_model_C, type = "response")
+D_Train <- 1 - predict(glm_class_model_D, type = "response")
+lr_ABCD_Train <- cbind(A_Train,B_Train,C_Train,D_Train)
+
+classes_names <- c('A','B','C','D')
+finalPredictions_Train <- classes_names[max.col(lr_ABCD_Train)]
+
+LR_class_model_Acc_Train <- round(mean(finalPredictions_Train==math_train_Class$G3Class),5)
+
+#LR 1 vs all Test
+math_test_Class_Excellent <- math_test_Class
+math_test_Class_Excellent$G3Class <- ifelse(math_test_Class$G3Class != 'A','Other','A')
+math_test_Class_Good <- math_test_Class
+math_test_Class_Good$G3Class <- ifelse(math_test_Class$G3Class != 'B','Other','B')
+math_test_Class_Bad <- math_test_Class
+math_test_Class_Bad$G3Class <- ifelse(math_test_Class$G3Class != 'C','Other','C')
+math_test_Class_Fail <- math_test_Class
+math_test_Class_Fail$G3Class <- ifelse(math_test_Class$G3Class != 'D','Other','D')
+
+A_test <- 1 - predict(glm_class_model_A,newdata = math_test_Class_Excellent , type = "response")
+B_test <- 1 - predict(glm_class_model_B,newdata = math_test_Class_Good , type = "response")
+C_test <- 1 - predict(glm_class_model_C,newdata = math_test_Class_Bad , type = "response")
+D_test <- 1 - predict(glm_class_model_D,newdata = math_test_Class_Fail , type = "response")
+lr_ABCD_test <- cbind(A_test,B_test,C_test,D_test)
+
+finalPredictions_test <- classes_names[max.col(lr_ABCD_test)]
+
+LR_class_model_Acc_Test <- mean(finalPredictions_test==math_test_Class$G3Class)
+
+
+#LR 1vsAll NoG Train
+
+set.seed(1)
+glm_class_model_A_NoG <- glm(as.factor(G3Class) ~ . -G1 -G2, data = math_train_Class_Excellent, family = binomial)
+glm_class_model_A_NoG = step(glm_class_model_A_NoG, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Excellent, glm_class_model_A_NoG, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_B_NoG <- glm(as.factor(G3Class) ~ . -G1 -G2, data = math_train_Class_Good, family = binomial)
+glm_class_model_B_NoG = step(glm_class_model_B_NoG, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Good, glm_class_model_B_NoG, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_C_NoG <- glm(as.factor(G3Class) ~ . -G1 -G2, data = math_train_Class_Bad, family = binomial)
+glm_class_model_C_NoG = step(glm_class_model_C_NoG, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Bad, glm_class_model_C_NoG, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_D_NoG <- glm(as.factor(G3Class) ~ . -G1 -G2, data = math_train_Class_Fail, family = binomial)
+glm_class_model_D_NoG = step(glm_class_model_D_NoG, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(math_train_Class_Fail, glm_class_model_D_NoG, K = 5)$delta[1]
+
+A_Train_NoG <- 1 - predict(glm_class_model_A_NoG, type = "response")
+B_Train_NoG <- 1 - predict(glm_class_model_B_NoG, type = "response")
+C_Train_NoG <- 1 - predict(glm_class_model_C_NoG, type = "response")
+D_Train_NoG <- 1 - predict(glm_class_model_D_NoG, type = "response")
+lr_ABCD_Train_NoG <- cbind(A_Train_NoG,B_Train_NoG,C_Train_NoG,D_Train_NoG)
+
+classes_names <- c('A','B','C','D')
+finalPredictions_Train_NoG <- classes_names[max.col(lr_ABCD_Train_NoG)]
+
+LR_class_model_Acc_Train_NoG <- round(mean(finalPredictions_Train_NoG==math_train_Class$G3Class),5)
+
+#LR 1 vs all Test
+A_test_NoG <- 1 - predict(glm_class_model_A_NoG,newdata = math_test_Class_Excellent , type = "response")
+B_test_NoG <- 1 - predict(glm_class_model_B_NoG,newdata = math_test_Class_Good , type = "response")
+C_test_NoG <- 1 - predict(glm_class_model_C_NoG,newdata = math_test_Class_Bad , type = "response")
+D_test_NoG <- 1 - predict(glm_class_model_D_NoG,newdata = math_test_Class_Fail , type = "response")
+lr_ABCD_test_NoG <- cbind(A_test_NoG,B_test_NoG,C_test_NoG,D_test_NoG)
+
+finalPredictions_test_NoG <- classes_names[max.col(lr_ABCD_test_NoG)]
+
+LR_class_model_Acc_Test_NoG <- mean(finalPredictions_test_NoG==math_test_Class$G3Class)
+
+math_best_G_rf_train <- rf_class_model_Acc_Train
+math_best_G_rf_test <- rf_class_model_Acc_Test
+math_best_NoG_LR_train <- LR_class_model_Acc_Train_NoG
+math_best_NoG_LR_test <- LR_class_model_Acc_Test_NoG
+#Table
+r_names <- c('KNN*','KNN**','RF*','RF**','LR 1vsAll*','LR 1vsAll**')
+Accuracy_Train <- c(knn_class_model_Acc_Train,knn_class_model_NoG_Acc_Train,rf_class_model_Acc_Train,rf_class_model_NoG_Acc_Train,ova_Acc_Train,LR_class_model_Acc_Train_NoG)
+Accuracy_Test <- c(knn_class_model_Acc_Test,knn_class_model_NoG_Acc_Test,rf_class_model_Acc_Test,rf_class_model_NoG_Acc_Test,LR_class_model_Acc_Test,LR_class_model_Acc_Test_NoG)
+summary_data <- data.frame(Accuracy_Train,Accuracy_Test,row.names = r_names)
+kable(summary_data,digits = c(4,4,19,7))  %>%
+  kable_styling()
+```
+\* - Including G1,G2 in the model<br />
+\*\* - Not including G1,G2 in the model
+
+In summary, the best model with the use of G1,G2 is the Random Forest (with the regsubsets coefficients), and the best one without G1,G2 is the Logistic Regression 1 vs all.
+
+
+### Math VS Portuguese - Summary Table{.smaller}
+Next,we analyzed the Portuguese data set like we did with the Math data set. We visualized the data, checked the correlations, tried different models and picked the best ones. We will present here the final results, the whole code can be found in the .rmd file.
+```{r,eval=TRUE ,echo=FALSE,results="hide",fig.keep="none",warning=FALSE}
+#Data partition
+set.seed(1)
+train_idx_por <- createDataPartition(dat_por$G3, p = 0.8, list = FALSE)
+por_train <- dat_por[train_idx_por,]
+por_test <- dat_por[-train_idx_por,]
+
+#Correlation Matrix - Pearson
+por_train_corr <- subset(por_train, select = -c(Fjob, Mjob,reason,guardian))
+inds <- sapply(por_train_corr, is.factor)
+por_train_corr[inds] <- lapply(por_train_corr[inds], function(x) as.numeric(as.factor(x)) - 1)
+
+cormat <- round(cor(por_train_corr),2)
+#head(cormat)
+library(reshape2)
+melted_cormat <- melt(cormat)
+#head(melted_cormat)
+library(ggplot2)
+#ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+#  geom_tile()
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+  # Get upper triangle of the correlation matrix
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+upper_tri <- get_upper_tri(cormat)
+#upper_tri
+library(reshape2)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Heatmap
+library(ggplot2)
+obj1 <- ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+
+
+#Correlation Matrix - Spearman
+por_train_corr <- subset(por_train, select = -c(Fjob, Mjob,reason,guardian))
+inds <- sapply(por_train_corr, is.factor)
+por_train_corr[inds] <- lapply(por_train_corr[inds], function(x) as.numeric(as.factor(x)) - 1)
+
+cormat <- round(cor(por_train_corr,method = "spearman"),2)
+#head(cormat)
+library(reshape2)
+melted_cormat <- melt(cormat)
+#head(melted_cormat)
+library(ggplot2)
+#ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+#  geom_tile()
+# Get lower triangle of the correlation matrix
+  get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+  }
+  # Get upper triangle of the correlation matrix
+  get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+upper_tri <- get_upper_tri(cormat)
+#upper_tri
+library(reshape2)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Heatmap
+library(ggplot2)
+obj2 <- ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Spearman\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 90, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+grid.arrange(obj1,obj2,nrow = 1, ncol = 2)
+
+
+#G2
+g2 <- ggplot(data = por_train, mapping = aes(x=G2, y=G3)) + geom_jitter(col = 'red') + xlab('G2') + ylab('G3')  + ggtitle('G3 vs G2') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#Absences
+absences <- ggplot(data = por_train, mapping = aes(x=absences, y=G3)) + geom_jitter( col = 'red') + xlab('Absences') + ylab('G3')  + ggtitle('G3 vs Absences') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+grid.arrange(g2,absences,nrow = 1, ncol = 2)
+
+
+
+cbPalette <- c("red","yellow","blue","green")
+
+failures_color <- factor(por_train$failures)
+obj2 <- ggplot(data = por_train,mapping = aes(x=factor(failures),y=G3)) + geom_boxplot(fill = cbPalette) + xlab('Failures')
+obj2
+
+#Failures Histograms
+tmp1 <- subset(por_train,failures == 0,select = G3)
+tmp2 <- subset(por_train,failures == 1,select = G3)
+tmp3 <- subset(por_train,failures == 2,select = G3)
+tmp4 <- subset(por_train,failures == 3,select = G3)
+
+
+data <- matrix(c(round(mean(tmp1$G3),2),round(mean(tmp2$G3),2),round(mean(tmp3$G3),2),round(mean(tmp4$G3),2),round(sd(tmp1$G3),2),round(sd(tmp2$G3),2),round(sd(tmp3$G3),2),round(sd(tmp4$G3),2),median(tmp1$G3),median(tmp2$G3),median(tmp3$G3),median(tmp4$G3)),ncol=4,nrow = 3,byrow=TRUE)
+colnames(data) <- c("0","1","2","more than 2")
+rownames(data) <- c("Mean","Std","Median")
+data <- as.table(data)
+data
+
+
+#G1
+obj <- ggplot(data = por_train, mapping = aes(x=G1, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('G1') + ylab('G3')  + ggtitle('G3 vs G1') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#G2
+obj <- ggplot(data = por_train, mapping = aes(x=G2, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('G2') + ylab('G3')  + ggtitle('G3 vs G2') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+#Absences
+obj <- ggplot(data = por_train, mapping = aes(x=absences, y=G3, col = 'red'))
+obj + geom_jitter() + xlab('Absences') + ylab('G3')  + ggtitle('G3 vs Absences') + theme(plot.title = element_text(hjust = 0.5)) + geom_smooth(method = "lm", se = FALSE,col = 'blue')
+
+cbPalette <- c("red","yellow","blue","black")
+#Studytime
+obj <- ggplot(data = por_train, mapping = aes(x=studytime, y=G3, color = factor(studytime)))
+obj +  xlab('Studytime') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Studytime jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Studytime Histograms
+tmp1 <- subset(por_train,studytime == 1,select = G3)
+tmp2 <- subset(por_train,studytime == 2,select = G3)
+tmp3 <- subset(por_train,studytime == 3,select = G3)
+tmp4 <- subset(por_train,studytime == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=1, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=2, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=3, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=4, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,nrow = 2, ncol = 2)
+
+#Higher
+higher_num <- as.numeric(por_train$higher)
+obj <- ggplot(data = por_train, mapping = aes(x=higher_num, y=G3, color = factor(higher)))
+obj +  xlab('Higher') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Higher jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Higher Histograms
+tmp1 <- subset(por_train,as.numeric(higher) == 1,select = G3) #No
+tmp2 <- subset(por_train,as.numeric(higher) == 2,select = G3) #Yes
+nrow(tmp1) # number of students that don't want higher education 
+nrow(tmp2) # number of students that want higher education
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('higher=No, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('study=2, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,nrow = 1, ncol = 2)
+
+#Failures
+obj <- ggplot(data = por_train, mapping = aes(x=failures, y=G3, color = factor(failures)))
+obj +  xlab('Failures') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Failures jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Failures Histograms
+tmp1 <- subset(por_train,failures == 0,select = G3)
+tmp2 <- subset(por_train,failures == 1,select = G3)
+tmp3 <- subset(por_train,failures == 2,select = G3)
+tmp4 <- subset(por_train,failures == 3,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('failures=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,nrow = 2, ncol = 2)
+
+cbPalette <- c("red","yellow","blue","black","green")
+#Medu
+obj <- ggplot(data = por_train, mapping = aes(x=Medu, y=G3, color = factor(Medu)))
+obj +  xlab('Medu') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Medu jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Medu Histograms
+tmp1 <- subset(por_train,Medu == 0,select = G3)
+tmp2 <- subset(por_train,Medu == 1,select = G3)
+tmp3 <- subset(por_train,Medu == 2,select = G3)
+tmp4 <- subset(por_train,Medu == 3,select = G3)
+tmp5 <- subset(por_train,Medu == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj5 <- ggplot(data = tmp5, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Medu=4, ' * mu * '=' * .(round(mean(tmp5$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp5$G3),2)) * ', med=' * .(median(tmp5$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,obj4,nrow = 3, ncol = 2)
+
+#Fedu
+obj <- ggplot(data = por_train, mapping = aes(x=Fedu, y=G3, color = factor(Fedu)))
+obj +  xlab('Fedu') + ylab('G3')  + geom_jitter(width = 0.2,height = 0.1) + ggtitle('G3 vs Fedu jittered') + theme(plot.title = element_text(hjust = 0.5)) + scale_color_manual(values = cbPalette)
+
+#Failures Histograms
+tmp1 <- subset(por_train,Fedu == 0,select = G3)
+tmp2 <- subset(por_train,Fedu == 1,select = G3)
+tmp3 <- subset(por_train,Fedu == 2,select = G3)
+tmp4 <- subset(por_train,Fedu == 3,select = G3)
+tmp5 <- subset(por_train,Fedu == 4,select = G3)
+
+obj1 <- ggplot(data = tmp1, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=0, ' * mu * '=' * .(round(mean(tmp1$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp1$G3),2)) * ', med=' * .(median(tmp1$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj2 <- ggplot(data = tmp2, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=1, ' * mu * '=' * .(round(mean(tmp2$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp2$G3),2)) * ', med=' * .(median(tmp2$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj3 <- ggplot(data = tmp3, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=2, ' * mu * '=' * .(round(mean(tmp3$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp3$G3),2)) * ', med=' * .(median(tmp3$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj4 <- ggplot(data = tmp4, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=3, ' * mu * '=' * .(round(mean(tmp4$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp4$G3),2)) * ', med=' * .(median(tmp4$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+obj5 <- ggplot(data = tmp5, aes(G3)) + geom_histogram(aes(y = ..density..),bins = 10, col = 'grey') + ggtitle(bquote('Fedu=4, ' * mu * '=' * .(round(mean(tmp5$G3),2)) * ', ' * sigma * '=' * .(round(sd(tmp5$G3),2)) * ', med=' * .(median(tmp5$G3)))) + theme(plot.title = element_text(hjust = 0.5)) + geom_density()
+grid.arrange(obj1,obj2,obj3,obj4,obj4,nrow = 3, ncol = 2)
+
+
+#Regsubsets without G1 G2
+subsets_Gout_por <- regsubsets(G3 ~ . ,data = por_train[,c(-31,-32)], nvmax = 20)
+subsets_Gout_sum_por <- summary(subsets_Gout_por)
+
+#without G1 G2
+#-------------
+#get index of best adjr2
+best_adjr2_num_Gout <- which.max(subsets_Gout_sum_por$adjr2)
+#get best adjr2's value
+subsets_Gout_sum$adjr2[best_adjr2_num_Gout]
+#get coef values of the chosen model
+coef(subsets_Gout,best_adjr2_num_Gout)
+#data modification train
+por_train_mod_Gout=por_train
+por_train_mod_Gout$Mjob[por_train_mod_Gout$Mjob !='health'] <- 'other' 
+por_train_mod_Gout$Fjob[por_train_mod_Gout$Fjob !='services'] <- 'teacher' 
+por_train_mod_Gout$guardian[por_train_mod_Gout$guardian !='mother'] <- 'other' 
+#data modification test
+por_test_mod_Gout <- por_test
+por_test_mod_Gout$Mjob[por_test_mod_Gout$Mjob !='health'] <- 'other' 
+por_test_mod_Gout$Fjob[por_test_mod_Gout$Fjob !='services'] <- 'teacher'
+por_test_mod_Gout$guardian[por_test_mod_Gout$guardian !='mother'] <- 'other' 
+#linear model 
+model_lr_reg_Gout <- lm(G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = por_train_mod_Gout)
+model_sum_Gout <- summary(model_lr_reg_Gout)
+# #Same linear model using caret, to get CV RMSE
+# set.seed(1)
+# model_lr_reg_Gout_CV <- train(G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = por_train_mod_Gout, method="lm")
+# #RMSE of CV
+# rmse_reg_Gout_por <- round(model_lr_reg_Gout_CV$results$RMSE,4)
+#RMSE
+rmse_reg_Gout_por <- round(model_sum_Gout$sigma,4)
+#adjr2
+adjr2_reg_Gout_por <- round(model_sum_Gout$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_reg_Gout_por <- round(shapiro.test(resid(model_lr_reg_Gout))$p.value,10)
+#Breusch-Pagan
+bp_reg_Gout_por <- round(bptest(model_lr_reg_Gout)$p.value,5)
+
+#Regsubsets
+subsets <- regsubsets(G3 ~ . ,data = por_train, nvmax = 20)
+subsets_sum <- summary(subsets)
+
+#with G1 G2
+#-------------
+#get index of best adjr2
+best_adjr2_num <- which.max(subsets_sum$adjr2)
+AdjR2 <- subsets_sum$adjr2
+#plotting adjr2 vs number of features
+obj1 <- ggplot(mapping = aes(x=c(1:20), y=subsets_sum$adjr2, color = AdjR2)) + geom_point() + xlab('Number of Features') + ylab('Adjusted R-Squared') 
+obj1 + geom_point(
+    data=data.frame(x=best_adjr2_num,y=subsets_sum$adjr2[best_adjr2_num]),
+    aes(x,y),
+    color="red",
+    size=4) + geom_text(aes(x=best_adjr2_num,y=subsets_sum$adjr2[best_adjr2_num],label = round(subsets_sum$adjr2[best_adjr2_num],4)),col = 'black',hjust=1.3, vjust=-0.3)
+
+#get coef values of the chosen model
+coef(subsets,best_adjr2_num)
+
+#With G1 G2
+#-----------
+#modify train
+por_train_modified=por_train
+por_train_modified$Mjob[por_train_modified$Mjob!='health' & 
+por_train_modified$Mjob!='services' & 
+por_train_modified$Mjob!='teacher'] <- 'other'
+por_train_modified$reason[por_train_modified$reason!='other'] <- 'home' 
+por_train_modified$guardian[por_train_modified$guardian!='other'] <- 'mother'
+por_train_modified$Fjob[por_train_modified$Fjob!='services'] <- 'other'
+
+#modify test
+por_test_modified=por_test
+por_test_modified$Mjob[por_test_modified$Mjob!='health' & 
+por_test_modified$Mjob!='services' & 
+por_test_modified$Mjob!='teacher'] <- 'other'
+por_test_modified$reason[por_test_modified$reason!='other'] <- 'home' 
+por_test_modified$guardian[por_test_modified$guardian!='other'] <- 'mother'
+por_test_modified$Fjob[por_test_modified$Fjob!='services'] <- 'other'
+
+#linear model 
+model_lr_regsubsets <- lm(G3 ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2 ,data = por_train_modified)
+model_sum <- summary(model_lr_regsubsets)
+# #Same linear model using caret, to get CV RMSE
+# set.seed(1)
+# model_lr_regsubsets_CV <- train(G3 ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2 ,data = por_train_modified, method="lm")
+# #RMSE of CV
+# rmse_regsubsets_por <- round(model_lr_regsubsets_CV$results$RMSE,4)
+#RMSE
+rmse_regsubsets_por <- round(model_sum$sigma,4)
+#adjr2
+adjr2_regsubsets_por <- round(model_sum$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_regsubsets_por <- round(shapiro.test(resid(model_lr_regsubsets))$p.value,20)
+#Breusch-Pagan
+bp_regsubsets_por <- round(bptest(model_lr_regsubsets)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(model_lr_regsubsets),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(model_lr_regsubsets),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(model_lr_regsubsets),resid(model_lr_regsubsets),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+
+#finding lambda using boxcox without G1 G2
+model_boxcox_Gout <- boxcox(lm(G3+1 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences  ,data = por_train_mod_Gout), plotit = FALSE)
+lambda_Gout <- model_boxcox_Gout$x[which(model_boxcox_Gout$y==max(model_boxcox_Gout$y))]
+#making transformation with the given lambda without G1 G2
+boxcox_model_reg_Gout <- lm(((((G3+1)^lambda_Gout) - 1) / lambda_Gout) ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences ,data = por_train_mod_Gout)
+sum_cox_reg_Gout <- summary(boxcox_model_reg_Gout)
+#RMSE
+rmse_boxcox_Gout_por <- round(sum_cox_reg_Gout$sigma,4)
+#adjr2
+adjr2_boxcox_Gout_por <- round(sum_cox_reg_Gout$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_boxcox_Gout_por <- round(shapiro.test(resid(boxcox_model_reg_Gout))$p.value,5)
+#Breusch-Pagan
+bp_boxcox_Gout_por <- round(bptest(boxcox_model_reg_Gout)$p.value,5)
+
+#finding lambda using boxcox with G1 G2
+model_boxcox <- boxcox(lm(G3+1 ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2 ,data = por_train_modified), plotit = TRUE)
+#get lambda
+lambda <- model_boxcox$x[which(model_boxcox$y==max(model_boxcox$y))]
+lambda
+#making transformation with the given lambda with G1 G2
+boxcox_model_regsubsets <- lm(((((G3+1)^lambda) - 1) / lambda) ~ absences + reason + Fjob + guardian + activities + G2 + traveltime + studytime + failures + famrel + G1 ,data = por_train_modified)
+#Function which calculates RMSE
+calc_RMSE = function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+#Function which calculates AdjR2
+calc_AdjR2 = function(p,fitted,actual) {
+  n <- length(fitted)
+  SSReg <- sum((fitted-mean(actual))^2)
+  SST <- sum((actual-mean(actual))^2)
+  R2 <- SSReg / SST
+  AdjR2 <- 1 - (1 - R2) * ((n - 1) / (n - p - 1))
+  return(AdjR2)
+}
+#boxcox model's values transformed back to G3
+y=pmax(fitted(boxcox_model_regsubsets),0) #handle negative values
+y=((lambda*y+1)^(1/lambda))-1 
+#RMSE
+rmse_boxcox_por <- round(calc_RMSE(por_train_modified$G3,y),5)
+#AdjR2
+adjr2_boxcox_por <- round(calc_AdjR2(12,y,por_train_modified$G3),4)
+#Shapiro-Wilk
+shapiro_boxcox_por <- round(shapiro.test(resid(boxcox_model_regsubsets))$p.value,12)
+#Breusch-Pagan
+bp_boxcox_por <- round(bptest(boxcox_model_regsubsets)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(boxcox_model_regsubsets),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(boxcox_model_regsubsets),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(boxcox_model_regsubsets),resid(boxcox_model_regsubsets),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+
+#K-nn regression with G1 G2
+#----------------------------
+
+set.seed(1)
+knn_reg_model = train( #All Features
+  G3 ~ .,
+  data = por_train,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results <- knn_reg_model$results
+#min RMSE's index
+min_rmse_indx <- which.min(knn_results$RMSE)
+rmse_knn <- round(knn_results$RMSE[min_rmse_indx],4)
+rmse_knn
+set.seed(1)
+knn_reg_model_ordOut = train( #All Features except non ordinal categorical variables
+  G3 ~ .,
+  data = por_train[,-c(9:12)],
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_ordOut <- knn_reg_model_ordOut$results
+#min RMSE's index
+min_rmse_indx_ordOut <- which.min(knn_results$RMSE)
+rmse_knn_ordOut <- round(knn_results_ordOut$RMSE[min_rmse_indx_ordOut],4)
+rmse_knn_ordOut
+
+set.seed(1)
+knn_reg_model_reg = train( #Regsubsets Features with G1 G2
+  G3 ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2 ,
+  data = por_train_modified,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_reg <- knn_reg_model_reg$results
+#min RMSE's index
+min_rmse_indx_reg <- which.min(knn_results_reg$RMSE)
+rmse_knn_reg_por <- round(knn_results_reg$RMSE[min_rmse_indx_reg],4)
+p_label_reg <- paste('(',knn_results_reg$k[min_rmse_indx_reg],',',
+               rmse_knn_reg,')',sep = '')
+#K-nn regression without G1 G2
+#-----------------------------
+set.seed(1)
+knn_reg_model_reg_Gout = train( #Regsubsets Features without G1 G2
+  G3 ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences,
+  data = por_train_mod_Gout,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+knn_results_reg_Gout <- knn_reg_model_reg_Gout$results
+#min RMSE's index
+min_rmse_indx_reg_Gout <- which.min(knn_results_reg_Gout$RMSE)
+rmse_knn_reg_Gout_por <- round(knn_results_reg_Gout$RMSE[min_rmse_indx_reg_Gout],4)
+
+#plot rmse vs k
+obj2 <- ggplot(data = knn_results_reg,mapping = aes(x = k,y = RMSE)) + geom_line()
+obj2 + geom_point(data=knn_results_reg,aes(x = k[min_rmse_indx_reg],y = RMSE[min_rmse_indx_reg]),color="red",size=4) +
+geom_text(data=knn_results_reg, mapping = aes(x = k[min_rmse_indx_reg],
+  y =  RMSE[min_rmse_indx_reg],label=p_label_reg),hjust=-0.2, vjust=0.32) +
+ggtitle('RMSE vs k') + theme(plot.title = element_text(hjust = 0.5))
+
+#TEST RMSE
+#Function which calculates RMSE
+calc_RMSE = function(actual, predicted) {
+  sqrt(mean((actual-predicted)^2))
+}
+#RMSE for regsubsets lm model with G1 G2
+rmse_test_reg_por <- round(calc_RMSE(por_test_modified$G3,predict(model_lr_regsubsets,newdata=por_test_modified)),5)
+#RMSE for regsubsets lm model without G1 G2
+rmse_test_reg_Gout_por <- round(calc_RMSE(por_test_mod_Gout$G3,predict(model_lr_reg_Gout,newdata=por_test_mod_Gout)),5)
+#RMSE for boxcox model with G1 G2
+y=pmax(predict(boxcox_model_regsubsets,newdata=por_test_modified),0)
+y=((lambda*y+1)^(1/lambda))-1
+rmse_test_boxcox_por <- round(calc_RMSE(por_test_modified$G3,y),5)
+#RMSE for boxcox model without G1 G2
+y=pmax(predict(boxcox_model_reg_Gout,newdata=por_test_mod_Gout),0)
+y=((lambda_Gout*y+1)^(1/lambda_Gout))-1
+rmse_test_boxcox_Gout_por <- round(calc_RMSE(por_test_mod_Gout$G3,y),5)
+#RMSE for knn lm model with G1 G2
+rmse_test_knn_por <- round(calc_RMSE(por_test$G3,predict(knn_reg_model_reg,newdata=por_test)),5)
+#RMSE for regsubsets lm model without G1 G2
+rmse_test_knn_Gout_por <- round(calc_RMSE(por_test$G3,predict(knn_reg_model_reg_Gout,newdata=por_test)),5)
+
+
+r_names <- c('Regsubsets*','Regsubsets**','Boxcox*','Boxcox**','KNN*','KNN**')
+RMSE <- c(rmse_regsubsets_por,rmse_reg_Gout_por,rmse_boxcox_por,rmse_boxcox_Gout_por,rmse_knn_reg_por,rmse_knn_reg_Gout_por)
+AdjR2<- c(as.character(adjr2_regsubsets_por),as.character(adjr2_reg_Gout_por),as.character(adjr2_boxcox_por),as.character(adjr2_boxcox_Gout_por),'-','-')
+Shapiro <- c(as.character(shapiro_regsubsets_por),as.character(shapiro_reg_Gout_por),as.character(shapiro_boxcox_por),as.character(shapiro_boxcox_Gout_por),'-','-')
+BP <- c(as.character(bp_regsubsets_por),as.character(bp_reg_Gout_por),as.character(bp_boxcox_por),as.character(bp_boxcox_Gout_por),'-','-')
+Test_RMSE <- c(rmse_test_reg_por,rmse_test_reg_Gout_por,rmse_test_boxcox_por,rmse_test_boxcox_Gout_por,rmse_test_knn_por,rmse_test_knn_Gout_por)
+summary_data <- data.frame(RMSE,AdjR2,Shapiro,BP,Test_RMSE,row.names = r_names)
+kable(summary_data,digits = c(4,4,19,7))  %>%
+  kable_styling()
+
+#Classification of 4 categories
+G3_4Class <- vector('numeric',nrow(dat_por))
+# grades 0-5
+G3_4Class[which(dat_por$G3<=5)] <- 'D' 
+# grades 6-10
+G3_4Class[which(dat_por$G3>5 & dat_por$G3<=10)] <- 'C' 
+# grades 11-15
+G3_4Class[which(dat_por$G3>10 & dat_por$G3<=15)] <- 'B' 
+# grades 16-20
+G3_4Class[which(dat_por$G3>15 & dat_por$G3<=20)] <- 'A' 
+por_Class <- cbind(dat_por[,-33],G3Class=G3_4Class)
+kable(head(por_Class))  %>%
+  kable_styling() %>%  scroll_box(width = "800px", height = "180px")
+
+#Data partition
+set.seed(3)
+train_idx_class_por <- createDataPartition(por_Class$G3Class, p = 0.8, list = FALSE)
+por_train_Class <- por_Class[train_idx_class_por,]
+por_test_Class <- por_Class[-train_idx_class_por,]
+
+#get count for each class
+classes_table <- table(por_train_Class$G3Class)
+#calculate B class percentage
+B_perc <- round(classes_table[[2]] / nrow(por_train_Class) * 100,2)
+#percentage 
+histogram(por_train_Class$G3Class,frequency = TRUE,main = paste('Percentage of B grade is',B_perc),xlab = 'Grades')
+
+#with G1 G2
+#--------------
+#K-NN Regsubsets features
+por_train_Class_modified <- por_train_Class
+por_train_Class_modified$Mjob[por_train_Class_modified$Mjob!='health' & 
+por_train_Class_modified$Mjob!='services' & 
+por_train_Class_modified$Mjob!='teacher'] <- 'other'
+por_train_Class_modified$reason[por_train_Class_modified$reason!='other'] <- 'home' 
+por_train_Class_modified$guardian[por_train_Class_modified$guardian!='other'] <- 'mother'
+por_train_Class_modified$Fjob[por_train_Class_modified$Fjob!='services'] <- 'other'
+
+por_test_Class_modified <- por_test_Class
+por_test_Class_modified$Mjob[por_test_Class_modified$Mjob!='health' & 
+por_test_Class_modified$Mjob!='services' & 
+por_test_Class_modified$Mjob!='teacher'] <- 'other'
+por_test_Class_modified$reason[por_test_Class_modified$reason!='other'] <- 'home' 
+por_test_Class_modified$guardian[por_test_Class_modified$guardian!='other'] <- 'mother'
+por_test_Class_modified$Fjob[por_test_Class_modified$Fjob!='services'] <- 'other'
+
+#without G1 G2
+#--------------
+#K-NN Regsubsets features
+por_train_Class_mod_Gout=por_train_Class
+por_train_Class_mod_Gout$Mjob[por_train_Class_mod_Gout$Mjob !='health'] <- 'other' 
+por_train_Class_mod_Gout$Fjob[por_train_Class_mod_Gout$Fjob !='services'] <- 'teacher' 
+por_train_Class_mod_Gout$guardian[por_train_Class_mod_Gout$guardian !='mother'] <- 'other' 
+
+por_test_Class_mod_Gout=por_test_Class
+por_test_Class_mod_Gout$Mjob[por_test_Class_mod_Gout$Mjob !='health'] <- 'other' 
+por_test_Class_mod_Gout$Fjob[por_test_Class_mod_Gout$Fjob !='services'] <- 'teacher' 
+por_test_Class_mod_Gout$guardian[por_test_Class_mod_Gout$guardian !='mother'] <- 'other' 
+
+
+#Back to with G1 G2
+
+set.seed(1)
+knn_class_model_reg <- train(
+  form = G3Class ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2,
+  data = por_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model
+knn_results_Class <- knn_class_model_reg$results
+#max Accuracy's index
+max_Accuracy_indx <- which.max(knn_results_Class$Accuracy)
+Accuracy_knn <- round(knn_results_Class$Accuracy[max_Accuracy_indx],3)
+p_label_C <- paste('(',knn_results_Class$k[max_Accuracy_indx],',',
+              Accuracy_knn,')',sep = '')
+#plot rmse vs k
+objKnn <- ggplot(data = knn_results_Class,mapping = aes(x = k,y = Accuracy)) + geom_line() + geom_point(data=knn_results_Class,aes(x = k[max_Accuracy_indx],y = Accuracy_knn),color="red",size=4) +
+geom_text(data=knn_results_Class, mapping = aes(x = k[max_Accuracy_indx],
+  y =  Accuracy_knn,label=p_label_C),hjust=-0.2, vjust=0.32) +
+ggtitle('Accuracy vs k') + theme(plot.title = element_text(hjust = 0.5))
+
+#CM
+set.seed(1)
+predTest <- predict(knn_class_model_reg, newdata = por_test_Class_modified)
+
+confusion_matrix_rf <- as.data.frame(table(predTest, por_test_Class$G3Class))
+
+
+obj2 <- ggplot(data = confusion_matrix_rf,
+       mapping = aes(x = predTest,
+                     y = Var2)) +
+  geom_tile(aes(fill = Freq)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide = "legend") 
+
+grid.arrange(objKnn,obj2,nrow = 1, ncol = 2)
+
+
+#accuracy calculation function
+calc_acc = function(actual, predicted) {
+  mean(actual == predicted)
+}
+
+knn_class_model_reg_Acc_Test_por <- calc_acc(actual = por_test_Class$G3Class, predicted = predTest)
+
+knn_class_model_reg_Acc_Test_por
+
+#Two more models of K-NN
+#with G1 G2
+#--------------
+#K-NN All features
+set.seed(1)
+knn_class_model <- train(
+  form = G3Class ~ .,
+  data = por_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model
+
+knn_class_model_Acc_Train <- max(knn_class_model$results$Accuracy)
+
+#K-NN All Features except non ordinal categorical variables
+set.seed(1)
+knn_class_model_ordOut = train( #All Features except non ordinal categorical variables
+  G3Class ~ .,
+  data = por_train_Class[,-c(9:12)],
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+)
+
+knn_class_model_ordOut_Acc_Train <- max(knn_class_model_ordOut$results$Accuracy)
+
+#K-NN No G
+#All Features
+set.seed(1)
+knn_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = por_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_Acc_Train <- max(knn_class_model_NoG$results$Accuracy)
+
+knn_class_model_NoG_Acc_Test <- calc_acc(actual = por_test_Class$G3Class,
+                                         predicted = predict(knn_class_model_NoG, newdata = por_test_Class))
+
+#All Features except non ordinal categorical variables
+set.seed(1)
+knn_class_model_NoG_ordOut <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = por_train_Class[,-c(9:12)],
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_ordOut_Acc_Train <- max(knn_class_model_NoG_ordOut$results$Accuracy)
+
+knn_class_model_NoG_ordOut_Acc_Test <- calc_acc(actual = por_test_Class$G3Class,
+                                         predicted = predict(knn_class_model_NoG_ordOut, newdata = por_test_Class))
+#regsubsets features
+set.seed(1)
+knn_class_model_NoG_reg <- train(
+  form = G3Class ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences,
+  data = por_train_Class_mod_Gout,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "knn",
+  tuneGrid = expand.grid(k = seq(3, 100, by = 1)))
+#knn_class_model_NoG
+
+knn_class_model_NoG_reg_Acc_Train <- max(knn_class_model_NoG_reg$results$Accuracy)
+
+knn_class_model_NoG_reg_Acc_Test <- calc_acc(actual = por_test_Class_modified$G3Class,
+                                         predicted = predict(knn_class_model_NoG_reg, newdata = por_test_Class_mod_Gout))
+
+
+#regsubsets features
+set.seed(1)
+rf_class_model_reg <- train(
+  form = G3Class ~ school + sex + Medu + Mjob + Fjob + reason + guardian + failures + schoolsup + famsup + Dalc + health + G1 + G2,
+  data = por_train_Class_modified,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy <- round(max(rf_class_model_reg$results$Accuracy),5)
+
+
+
+#RF
+#with G1 G2
+#--------------
+#RF All features
+set.seed(1)
+rf_class_model <- train(
+  form = G3Class ~ .,
+  data = por_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_all <- round(max(rf_class_model$results$Accuracy),5)
+
+#CM
+set.seed(1)
+predTest <- predict(rf_class_model, newdata = por_test_Class)
+
+confusion_matrix_rf <- as.data.frame(table(predTest, por_test_Class$G3Class))
+
+
+ggplot(data = confusion_matrix_rf,
+       mapping = aes(x = predTest,
+                     y = Var2)) +
+  geom_tile(aes(fill = Freq)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide = "legend") 
+
+rf_class_model_Acc_Test <- calc_acc(actual = por_test_Class$G3Class, predicted = predTest)
+
+rf_class_model_Acc_Test
+
+#No G1 G2
+#--------------
+#RF Regsubsets features
+set.seed(1)
+rf_class_model_NoG_reg <- train(
+  form = G3Class ~ sex + age + famsize + Medu + Mjob + Fjob + reason + failures + schoolsup + famsup + paid + higher + romantic + freetime + goout + health + absences,
+  data = por_train_Class_mod_Gout,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_NoG <- round(max(rf_class_model_NoG_reg$results$Accuracy),5)
+
+#RF All features
+set.seed(1)
+rf_class_model_NoG <- train(
+  form = G3Class ~ . -G1 -G2,
+  data = por_train_Class,
+  trControl = trainControl(method = "cv", number = 5, savePredictions = T),
+  method = "ranger")
+
+rf_accuracy_all_NoG_Train <- round(max(rf_class_model_NoG$results$Accuracy),5)
+
+set.seed(1)
+predTest <- predict(rf_class_model_NoG, newdata = por_test_Class)
+rf_accuracy_all_NoG_Test <- calc_acc(actual = por_test_Class$G3Class, predicted = predTest)
+
+#LR 1vsAll
+por_train_Class_Excellent <- por_train_Class
+por_train_Class_Excellent$G3Class <- ifelse(por_train_Class$G3Class != 'A','Other','A')
+por_train_Class_Good <- por_train_Class
+por_train_Class_Good$G3Class <- ifelse(por_train_Class$G3Class != 'B','Other','B')
+por_train_Class_Bad <- por_train_Class
+por_train_Class_Bad$G3Class <- ifelse(por_train_Class$G3Class != 'C','Other','C')
+por_train_Class_Fail <- por_train_Class
+por_train_Class_Fail$G3Class <- ifelse(por_train_Class$G3Class != 'D','Other','D')
+
+set.seed(1)
+glm_class_model_A <- glm(as.factor(G3Class) ~ ., data = por_train_Class_Excellent, family = binomial)
+glm_class_model_A = step(glm_class_model_A, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(por_train_Class_Excellent, glm_class_model_A, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_B <- glm(as.factor(G3Class) ~ ., data = por_train_Class_Good, family = binomial)
+glm_class_model_B = step(glm_class_model_B, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(por_train_Class_Good, glm_class_model_B, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_C <- glm(as.factor(G3Class) ~ ., data = por_train_Class_Bad, family = binomial)
+glm_class_model_C = step(glm_class_model_C, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(por_train_Class_Bad, glm_class_model_C, K = 5)$delta[1]
+
+set.seed(1)
+glm_class_model_D <- glm(as.factor(G3Class) ~ ., data = por_train_Class_Fail, family = binomial)
+glm_class_model_D = step(glm_class_model_D, trace = 0)
+set.seed(1) #C-V accuracy evaluation
+#1-cv.glm(por_train_Class_Fail, glm_class_model_D, K = 5)$delta[1]
+
+A_Train <- 1 - predict(glm_class_model_A, type = "response")
+B_Train <- 1 - predict(glm_class_model_B, type = "response")
+C_Train <- 1 - predict(glm_class_model_C, type = "response")
+D_Train <- 1 - predict(glm_class_model_D, type = "response")
+lr_ABCD_Train <- cbind(A_Train,B_Train,C_Train,D_Train)
+
+classes_names <- c('A','B','C','D')
+finalPredictions_Train <- classes_names[max.col(lr_ABCD_Train)]
+
+ova_Acc_Train <- round(mean(finalPredictions_Train==por_train_Class$G3Class),5)
+
+#LR 1 vs all Test
+por_test_Class_Excellent <- por_test_Class
+por_test_Class_Excellent$G3Class <- ifelse(por_test_Class$G3Class != 'A','Other','A')
+por_test_Class_Good <- por_test_Class
+por_test_Class_Good$G3Class <- ifelse(por_test_Class$G3Class != 'B','Other','B')
+por_test_Class_Bad <- por_test_Class
+por_test_Class_Bad$G3Class <- ifelse(por_test_Class$G3Class != 'C','Other','C')
+por_test_Class_Fail <- por_test_Class
+por_test_Class_Fail$G3Class <- ifelse(por_test_Class$G3Class != 'D','Other','D')
+
+A_test <- 1 - predict(glm_class_model_A,newdata = por_test_Class_Excellent , type = "response")
+B_test <- 1 - predict(glm_class_model_B,newdata = por_test_Class_Good , type = "response")
+C_test <- 1 - predict(glm_class_model_C,newdata = por_test_Class_Bad , type = "response")
+D_test <- 1 - predict(glm_class_model_D,newdata = por_test_Class_Fail , type = "response")
+lr_ABCD_test <- cbind(A_test,B_test,C_test,D_test)
+
+finalPredictions_test <- classes_names[max.col(lr_ABCD_test)]
+
+LR_class_model_Acc_Test <- mean(finalPredictions_test==por_test_Class$G3Class)
+
+confusion_matrix_ova <- as.data.frame(table(finalPredictions_test, por_test_Class$G3Class))
+
+ggplot(data = confusion_matrix_ova,
+       mapping = aes(x = finalPredictions_test,
+                     y = Var2)) + xlab('Predicted Class') + ylab('Actual Class') + ggtitle('Confusion Matrix') + theme(plot.title = element_text(hjust = 0.5)) +
+  geom_tile(aes(fill = Freq)) +
+  geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+  scale_fill_gradient(low = "grey",
+                      high = "red",
+                      guide="legend") 
+```
+
+```{r,echo=FALSE,warning=FALSE}
+#Regression Table    
+r_names <- c('Math*','Math**','Portuguese*','Portuguese**')
+RMSE_Train <- c(math_regression_best_G_KNN_train,math_regression_best_NoG_KNN_train,rmse_regsubsets_por,rmse_reg_Gout_por)
+RMSE_Test <- c(math_regression_best_G_KNN_test,math_regression_best_NoG_KNN_test,rmse_test_reg_por,rmse_test_reg_Gout_por)
+summary_data <- data.frame(RMSE_Train,RMSE_Test,row.names = r_names)
+kable(summary_data,digits = c(4,4,19,7))  %>%
+  kable_styling()
+
+#Classification Table
+r_names <- c('Math*','Math**','Portuguese*','Portuguese**')
+Accuracy_Train <- c(math_best_G_rf_train,math_best_NoG_LR_train,rf_accuracy_all,rf_accuracy_all_NoG_Train)
+Accuracy_Test <- c(math_best_G_rf_test,math_best_NoG_LR_test,rf_class_model_Acc_Test,rf_accuracy_all_NoG_Test)
+summary_data <- data.frame(Accuracy_Train,Accuracy_Test,row.names = r_names)
+kable(summary_data,digits = c(4,4,19,7))  %>%
+  kable_styling()
+```
+
+\* - Including G1,G2 in the model<br />
+\*\* - Not including G1,G2 in the model <br />
+
+The results for best regression with and without G1,G2 for Portuguese was obtained with regsubsets coefficients linear model.
+The result for best classification with and without G1,G2 for Portuguese was obtained with Random Forest algorithm, using all features.
+
+
+```{r,echo=FALSE,warning=FALSE,results="hide",fig.keep="none"}
+# Combining Classification and Linear Regression - Portuguese
+
+#Modify data to include 0/'not zero' in G3
+por_train_zero <- por_train
+por_train_zero$G3[which(por_train_zero$G3>0)] <- "not zero" 
+por_test_zero <- por_test
+por_test_zero$G3[which(por_test_zero$G3>0)] <- "not zero" 
+#train classifier
+set.seed(1)
+knn_class_zero_por = train( 
+  form = G3 ~ .,
+  data = por_train_zero,
+  method = "knn",
+  trControl = trainControl(method = "cv", number = 5),
+  #preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(1, 100, by = 1))
+  )
+best_acc_idx_por <- which.max(knn_class_zero_por$results$Accuracy)
+acc_knn_train_por <- max(knn_class_zero_por$results$Accuracy)
+acc_knn_train_por
+k_knn_train_por <- knn_class_zero_por$results$k[best_acc_idx_por]
+k_knn_train_por
+
+#create dataset without zero
+por_train_zout <- por_train[which(por_train$G3 != 0),]
+#Regsubsets with G1,G2
+subsets_zout_por <- regsubsets(G3 ~ . ,data = por_train_zout, nvmax = 20)
+subsets_zout_sum_por <- summary(subsets_zout_por)
+#get index of best adjr2
+best_adjr2_zout_por <- which.max(subsets_zout_sum_por$adjr2)
+#get best adjr2's value
+subsets_zout_sum_por$adjr2[best_adjr2_zout_por]
+#get coef values of the chosen model
+coef(subsets_zout_por,best_adjr2_zout_por)
+
+#modified train data (with zero)
+por_train_class_reg_mod=por_train
+por_train_class_reg_mod$Mjob[por_train_class_reg_mod$Mjob !='teacher' & por_train_class_reg_mod$Mjob !='services'] <- 'other'
+por_train_class_reg_mod$Fjob[por_train_class_reg_mod$Fjob !='other' & por_train_class_reg_mod$Fjob !='services'] <- 'teacher'
+por_train_class_reg_mod$reason[por_train_class_reg_mod$reason!='home'] <- 'other'
+#modified test data (with zero)
+por_test_class_reg_mod=por_test
+por_test_class_reg_mod$Mjob[por_test_class_reg_mod$Mjob !='teacher' & 
+por_test_class_reg_mod$Mjob !='services'] <- 'other'
+por_test_class_reg_mod$Fjob[por_test_class_reg_mod$Fjob !='other' & 
+por_test_class_reg_mod$Fjob !='services'] <- 'teacher'
+por_test_class_reg_mod$reason[por_test_class_reg_mod$reason!='home'] <- 'other'
+#modify train (without zero)
+por_train_zout_mod=por_train_zout
+por_train_zout_mod$Mjob[por_train_zout_mod$Mjob !='teacher' & 
+por_train_zout_mod$Mjob !='services'] <- 'other'
+por_train_zout_mod$Fjob[por_train_zout_mod$Fjob !='other' & 
+por_train_zout_mod$Fjob !='services'] <- 'teacher'
+por_train_zout_mod$reason[por_train_zout_mod$reason!='home'] <- 'other'
+#modify test (without zero)
+por_test_zout <- por_test[which(por_test$G3 != 0),]
+por_test_zout_mod=por_test_zout
+por_test_zout_mod$Mjob[por_test_zout_mod$Mjob !='teacher' & 
+por_test_zout_mod$Mjob !='services'] <- 'other'
+por_test_zout_mod$Fjob[por_test_zout_mod$Fjob !='other' & 
+por_test_zout_mod$Fjob !='services'] <- 'teacher'
+por_test_zout_mod$reason[por_test_zout_mod$reason!='home'] <- 'other'
+
+#lm regsubsets zout with G1,G2
+reg_zout_por <- lm(G3 ~ sex + age + Mjob + Fjob + reason + traveltime + failures + G2
++ schoolsup + higher + internet  + Dalc + absences + G1 + goout + health ,data = por_train_zout_mod)
+reg_zout_sum_por <- summary(reg_zout_por)
+#RMSE
+rmse_reg_zout_por <- round(reg_zout_sum_por$sigma,4)
+#adjr2
+adjr2_reg_zout_por <- round(reg_zout_sum_por$adj.r.squared,4)
+#Shapiro-Wilk
+shapiro_reg_zout_por <- round(shapiro.test(resid(reg_zout_por))$p.value,20)
+#Breusch-Pagan
+bp_reg_zout_por <- round(bptest(reg_zout_por)$p.value,8)
+#QQplot
+par(mfrow = c(1,2))
+qqnorm(resid(reg_zout_por),col = 'grey',ylab =  'Residuals Quantiles')
+qqline(resid(reg_zout_por),col = 'darkorange')
+#residuals vs fitted
+plot(fitted(reg_zout_por),resid(reg_zout_por),xlab =  'Fitted', ylab = 'Residuals',col = 'grey', main = 'Residuals vs Fitted Plot')
+abline(h = 0, col = 'darkorange')
+
+set.seed(1)
+#rmse train classifier
+rmse_knn_class_train1_por <- sum(por_train$G3[fitted(knn_class_zero_por) == 0] ^ 2)
+#rmse train linear reg
+rmse_reg_train2_por <- sum((predict(reg_zout_por,newdata=por_train_class_reg_mod)[fitted(knn_class_zero_por) != 0] - por_train_class_reg_mod$G3[fitted(knn_class_zero_por) != 0]) ^ 2)
+#total train rmse
+rmse_train_class_reg_por <- sqrt((rmse_knn_class_train1_por+rmse_reg_train2_por)/nrow(por_train))
+rmse_train_class_reg_por
+
+set.seed(1)
+#predictions
+knn_class_zero_fit_por <- predict(knn_class_zero_por,newdata = por_test_zero)
+reg_zout_fit_por <- predict(reg_zout_por,newdata=por_test_class_reg_mod[knn_class_zero_fit_por != 0,])
+#classifier accuracy
+acc_knn_test_por <- calc_acc(por_test_zero$G3,knn_class_zero_fit_por)
+#rmse test classifier
+rmse_knn_class_test1_por <- sum(por_test$G3[knn_class_zero_fit_por == 0] ^ 2)
+#rmse test linear reg
+rmse_reg_test2_por <- sum((reg_zout_fit_por - por_test$G3[knn_class_zero_fit_por != 0]) ^ 2)
+#total test rmse
+rmse_test_class_reg_por <- sqrt((rmse_knn_class_test1_por+rmse_reg_test2_por)/nrow(por_test))
+rmse_test_class_reg_por
+```
+__Combining Classification and Linear Regression:__ <br />
+Math Train RMSE = `r rmse_train_class_reg`<br />
+Math Test RMSE = `r rmse_test_class_reg`<br />
+Portuguese Train RMSE = `r rmse_train_class_reg_por`<br />
+Portuguese Test RMSE = `r rmse_test_class_reg_por`<br />
+
+The test results of the combined method on the Portuguese data is excellent!
+<br />
+
+<font color='#548bc9'>
+
+# Conclusion 
+
+</font>
+<br />
+__Math VS Portuguese:__<br />
+We have tried several approaches on both Math and Portuguese data. The results show that in general, our predictions of the Portuguese grades are more accurate. This is especially noticeable with the regression methods. We believe there are two main reason for this: <br />
+1. The amount of data - the Portuguese data set has 649 observations, while the Math data has only 395 observations. The more data you have to train on - the better you can predict. <br />
+2. As we have seen previously, one of the main difficulties we encountered was due to the students with zero grade. These students were sort of outliers, and behaved differently from the majority (which caused problems in the linear regression model, for example). When we check the data sets, we can see that the Math data set has 9.6% students with zero grade, while the Portuguese data set has only 2.3%. This fact may contribute to the better results of the Portuguese predictions. <br /> <br />
+
+Another conclusion we reached during the project is that our decision to treat the two data sets seperately, following the paired t-test,  was indeed a good one. We saw that different features were chosen by the search algorithms in the two subjects, and also different methods and algorithms had the best results in them.   
+
+__Not using G1 and G2:__<br />
+In the beginning of the project, we struggled with the data, and were not sure that any features besides G1 and G2 were of any use. After a lot of effort, we are glad to see that other features do contribute to the predictions. We achieved better classifiers than the "dumb" classifier proposed in both Math and Portuguese (and also, by examining the actual predictions - the classifiers are certainly not "dumb"). And the RMSE of the regression methods were also a lot better than a random guess. We found there is valuable information there even without G1 and G2.
+
+__More complex methods:__<br />
+The idea of combining a binary classifier (zero grade or not) with a linear regression model as shown above was a really good example for us of how different simple models can be combined to build a more complex model with better results. We hope we can develop more complex models in our data science future (hopefully!)

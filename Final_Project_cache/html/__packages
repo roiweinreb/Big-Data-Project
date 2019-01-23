@@ -1,0 +1,15 @@
+base
+lattice
+ggplot2
+caret
+xtable
+gridExtra
+plotly
+MASS
+leaps
+zoo
+lmtest
+knitr
+kableExtra
+boot
+reshape2
